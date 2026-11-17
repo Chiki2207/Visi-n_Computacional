@@ -91,6 +91,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 _excel_lock = threading.Lock()          # una escritura de Excel a la vez
 _cola = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pasar-lista")
 _cola_huellas = ThreadPoolExecutor(max_workers=1, thread_name_prefix="huellas")
+_cola_nuevas = ThreadPoolExecutor(max_workers=1, thread_name_prefix="huellas-nuevas")   # fotos recién subidas: primero
+_fallos_huella: dict[str, dict] = {}    # selfie → último error del SERVIDOR al sacar su huella (se reintenta solo)
 _lock_clase: dict[str, threading.Lock] = {}
 _precalentando: set[str] = set()
 _trabajos: dict[str, dict] = {}         # listas en proceso o con error (en memoria)
@@ -160,7 +162,11 @@ def _ia_post(ruta: str, tiempo: float, **kw) -> dict:
     if r.status_code in (409, 413, 422):
         raise IAError(r.json().get("detail") or r.text)
     if r.status_code != 200:
-        raise HTTPException(503, f"El servicio de IA respondió {r.status_code}")
+        try:
+            detalle = r.json().get("detail")
+        except ValueError:
+            detalle = r.text[:300]
+        raise HTTPException(503, f"El servicio de IA respondió {r.status_code}: {detalle}")
     return r.json()
 
 
@@ -233,14 +239,31 @@ def _huella(ruta: Path, version: str) -> dict:
     return d
 
 
+def _huella_o_falla(ruta: Path, version: str) -> dict | None:
+    """Como _huella, pero si falla el SERVIDOR (IA caída, error interno, disco…) no corta nada: lo anota para
+    mostrarlo al docente y escribirlo en el registro; se reintenta solo cada 30 s."""
+    try:
+        d = _huella(ruta, version)
+        _fallos_huella.pop(str(ruta.resolve()), None)
+        return d
+    except Exception as ex:  # noqa: BLE001
+        msg = ex.detail if isinstance(ex, HTTPException) else f"{type(ex).__name__}: {ex}"
+        _fallos_huella[str(ruta.resolve())] = {"error": str(msg), "cuando": time.time()}
+        log.warning("No se pudo sacar la huella de %s: %s", ruta, msg, exc_info=not isinstance(ex, HTTPException))
+        return None
+
+
 def _huella_en_segundo_plano(ruta: Path) -> None:
-    """Apenas se sube la foto: la huella se saca por dentro (el docente no espera)."""
+    """Apenas se sube la foto: la huella se saca por dentro (el docente no espera), antes que lo demás."""
     def trabajo():
         try:
-            _huella(ruta, _ia_version())
-        except Exception as ex:  # noqa: BLE001  (IA apagada: se hace al entrar a la clase o al pasar lista)
-            log.info("Huella de %s pendiente: %s", ruta.name, ex)
-    _cola_huellas.submit(trabajo)
+            version = _ia_version()
+        except HTTPException as ex:
+            _fallos_huella[str(ruta.resolve())] = {"error": str(ex.detail), "cuando": time.time()}
+            log.warning("No se pudo sacar la huella de %s: %s", ruta, ex.detail)
+            return
+        _huella_o_falla(ruta, version)
+    _cola_nuevas.submit(trabajo)
 
 
 # ====================================================================== clases (carpetas + Excel)
@@ -380,10 +403,12 @@ def _huellas_al_arrancar() -> None:
             time.sleep(10)
     else:
         return
-    if CLASES.is_dir():
-        for c in sorted(CLASES.iterdir()):
-            if c.is_dir() and not c.name.startswith((".", "_")) and (c / "estudiantes.xlsx").is_file():
-                _precalentar(c)
+    while True:     # al arrancar y luego cada 30 s: crear las huellas que falten (y reintentar las que fallaron)
+        if CLASES.is_dir():
+            for c in sorted(CLASES.iterdir()):
+                if c.is_dir() and not c.name.startswith((".", "_")) and (c / "estudiantes.xlsx").is_file():
+                    _precalentar(c)
+        time.sleep(30)
 
 
 @asynccontextmanager
@@ -571,7 +596,11 @@ def estudiantes(clase: str, _u=Usr) -> list[dict]:
         huella, error = "sin_foto", "Falta la foto"
         if existe:
             d = _huella_guardada(e.ruta_imagen, version) if version else None
-            if d is None:
+            falla = _fallos_huella.get(str(e.ruta_imagen.resolve()))
+            if d is None and (falla or not version):
+                huella, faltan = "error_servidor", True
+                error = falla["error"] if falla else "El servicio de IA no responde"
+            elif d is None:
                 huella, error, faltan = "procesando", None, True
             elif "error" in d:
                 huella, error = "sin_cara", d["error"]
@@ -761,8 +790,11 @@ def _huellas_de_clase(c: Path) -> tuple[list, list]:
             if not est.ruta_imagen.is_file():
                 fallos.append({"id": est.id, "nombre": est.nombre, "motivo": f"sin_foto:{est.ruta_imagen}"})
                 continue
-            h = _huella(est.ruta_imagen, version)
-            if "error" in h:
+            h = _huella_o_falla(est.ruta_imagen, version)
+            if h is None:
+                err = _fallos_huella.get(str(est.ruta_imagen.resolve()), {}).get("error", "error del servidor")
+                fallos.append({"id": est.id, "nombre": est.nombre, "motivo": f"registro_fallo:no se pudo sacar la huella ({err})"})
+            elif "error" in h:
                 fallos.append({"id": est.id, "nombre": est.nombre, "motivo": f"registro_fallo:{h['error']}"})
             else:
                 alumnos.append({"id": est.id, "nombre": est.nombre, **h})

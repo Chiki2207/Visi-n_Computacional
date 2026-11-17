@@ -18,6 +18,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import sys
 import threading
@@ -85,7 +86,8 @@ def _version_huella() -> str:
 
 
 VERSION_HUELLA = _version_huella()
-_cerrojo = threading.Lock()      # un trabajo a la vez: el motor usa toda la CPU
+_cerrojo = threading.Lock()
+_log = logging.getLogger("ia_servicio")      # un trabajo a la vez: el motor usa toda la CPU
 
 
 @asynccontextmanager
@@ -157,6 +159,9 @@ async def registro(foto: UploadFile = File(...)) -> dict:
         reg, imagen = await run_in_threadpool(trabajo)
     except ValueError as ex:
         raise HTTPException(422, str(ex)) from ex
+    except Exception as ex:  # noqa: BLE001  (que el servidor web vea el motivo, no un 500 mudo)
+        _log.exception("Falló /registro")
+        raise HTTPException(500, f"Error de la IA: {type(ex).__name__}: {ex}") from ex
     ok, png = cv2.imencode(".png", reg["cara"])
     if not ok:
         raise HTTPException(500, "No se pudo guardar la cara alineada")
@@ -213,6 +218,9 @@ async def pasar_lista(foto: UploadFile = File(...), datos: str = Form(...)) -> d
         resultado, imagen = await run_in_threadpool(trabajo)
     except ValueError as ex:
         raise HTTPException(422, str(ex)) from ex
+    except Exception as ex:  # noqa: BLE001
+        _log.exception("Falló /pasar-lista")
+        raise HTTPException(500, f"Error de la IA: {type(ex).__name__}: {ex}") from ex
     lista = armar_lista(estudiantes, fallos, resultado)
     alto, ancho = imagen.shape[:2]
     filas = lista["filas"]

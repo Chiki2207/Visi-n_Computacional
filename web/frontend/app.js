@@ -397,7 +397,7 @@ function pestanaPasar(c, cont) {
   cont.replaceChildren(form);
   // ¿alguien sin huella? (no frena: al pasar lista el servidor saca las que falten)
   api(`/api/clases/${enc(c.id)}/estudiantes`).then((al) => {
-    const malos = al.filter((x) => x.huella === "sin_cara" || x.huella === "sin_foto");
+    const malos = al.filter((x) => x.huella === "sin_cara" || x.huella === "sin_foto" || x.huella === "error_servidor");
     const prep = al.filter((x) => x.huella === "procesando").length;
     const avisos = [];
     if (malos.length) avisos.push(el("p", { class: "msg msg-error", text: `Sin huella (su foto no sirve, cámbiela en Estudiantes): ${malos.map((x) => x.nombre).join(", ")}` }));
@@ -441,7 +441,8 @@ async function pestanaEstudiantes(c, cont) {
   const pintarResumen = (al) => {
     const n = (h) => al.filter((x) => x.huella === h).length;
     resumen.textContent = `${n("lista")} con huella` + (n("procesando") ? ` · ${n("procesando")} procesando` : "")
-      + (n("sin_cara") + n("sin_foto") ? ` · ${n("sin_cara") + n("sin_foto")} sin huella (foto que no sirve)` : "");
+      + (n("sin_cara") + n("sin_foto") ? ` · ${n("sin_cara") + n("sin_foto")} sin huella (foto que no sirve)` : "")
+      + (n("error_servidor") ? ` · ${n("error_servidor")} con error del servidor (se reintenta)` : "");
   };
   pintarResumen(alumnos);
   cont.replaceChildren(el("div", { class: "stack" }, form,
@@ -457,10 +458,10 @@ async function pestanaEstudiantes(c, cont) {
       const al = await api(`/api/clases/${enc(c.id)}/estudiantes`);
       for (const a of al) if (estados.has(a.codigo)) estados.get(a.codigo)(a);
       pintarResumen(al);
-      if (al.some((a) => a.huella === "procesando")) est.sondeo = setTimeout(seguir, 2500);
+      if (al.some((a) => a.huella === "procesando" || a.huella === "error_servidor")) est.sondeo = setTimeout(seguir, 3000);
     } catch { est.sondeo = setTimeout(seguir, 5000); }
   };
-  if (alumnos.some((a) => a.huella === "procesando")) est.sondeo = setTimeout(seguir, 2000);
+  if (alumnos.some((a) => a.huella === "procesando" || a.huella === "error_servidor")) est.sondeo = setTimeout(seguir, 2000);
 }
 
 function chipHuella(a) {
@@ -468,6 +469,9 @@ function chipHuella(a) {
   if (a.huella === "procesando") return el("span", { class: "chip chip-warn", text: "Procesando huella…" });
   if (a.huella === "sin_foto") return el("span", { class: "chip chip-bad", text: "Falta la foto" });
   if (a.huella === "sin_cara") return el("span", { class: "chip chip-bad", title: a.huella_error || "", text: "La foto no sirve: tome otra" });
+  if (a.huella === "error_servidor") return el("span", {},
+    el("span", { class: "chip chip-bad", text: "No se pudo sacar la huella (se reintenta sola)" }),
+    el("span", { class: "muted xs", style: { display: "block", marginTop: "2px", wordBreak: "break-word" }, text: a.huella_error || "" }));
   return el("span", { class: "chip chip-warn", text: "Procesando huella…" });   // estado desconocido: nunca acusar a la foto
 }
 
