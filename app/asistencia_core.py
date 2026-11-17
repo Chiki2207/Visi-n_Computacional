@@ -138,8 +138,13 @@ def selfies_por_repetir(matches: list[dict]) -> list[dict]:
 # 104 sugerencias, 99 correctas (95 %); 2 sugerían a otro alumno y 3 eran personas no registradas.
 # Con nota 0.25: 74, todas correctas, pero quedan fuera 25 caras de alumnos. Ninguna decisión del
 # motor cambió (mismos nombres en las 73).
+# También se sugiere una cara MUY DE LADO (giro >= SUGERIR_GIRO) de cualquier tamaño: de perfil la nota
+# baja aunque la cara se vea bien. Medido en el banco (2026-11-17, tmp/lab_lejos/x/pose_diag.py): las caras
+# de lado de 20 px o más ya se reconocían todas salvo una alumna de pie mirando el celular (8:41, 28 px,
+# 1º E011 con 0.272 y 0.126 de ventaja); esta regla la sugiere y no sugiere a nadie más en las 73 fotos-escala.
 SUGERIR_PX = 20
 SUGERIR_NOTA = 0.20
+SUGERIR_GIRO = 0.3
 MOTIVO_REVISAR = "revisar_cara_lejana"
 FOTO_COMPRIMIDA_PX = 1600   # WhatsApp normal deja la foto en 1600 px de lado mayor
 
@@ -154,7 +159,8 @@ def sugerencias_lejanas(matches: list[dict]) -> list[dict]:
         if nota is None or not isinstance(bb, (list, tuple)) or len(bb) < 4:
             continue
         lado = min(float(bb[2]) - float(bb[0]), float(bb[3]) - float(bb[1]))
-        if lado >= SUGERIR_PX or float(nota) < SUGERIR_NOTA:
+        de_lado = abs(float(m.get("giro") or 0.0)) >= SUGERIR_GIRO
+        if (lado >= SUGERIR_PX and not de_lado) or float(nota) < SUGERIR_NOTA:
             continue
         pid = str(m["candidate_id"])
         if pid not in salida or float(nota) > salida[pid]["nota"]:
@@ -197,9 +203,9 @@ def aviso_foto(por_revisar: int, lado: int | None) -> str:
     if por_revisar <= 0:
         return ""
     if por_revisar == 1:
-        txt = "1 cara lejana parece de un alumno pero es muy chica para ponerle nombre seguro"
+        txt = "1 cara (lejana o de lado) parece de un alumno pero no se le puede poner nombre seguro"
     else:
-        txt = f"{por_revisar} caras lejanas parecen de alumnos pero son muy chicas para ponerles nombre seguro"
+        txt = f"{por_revisar} caras (lejanas o de lado) parecen de alumnos pero no se les puede poner nombre seguro"
     txt += ": revise las marcadas «¿revisar?» y confirme con «Poner presente»"
     if lado is not None and lado <= FOTO_COMPRIMIDA_PX:
         txt += f". La foto tiene solo {lado} px (llegó comprimida)"

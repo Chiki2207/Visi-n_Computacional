@@ -572,6 +572,10 @@ def comparar_foto_grupal(
             entradas[i]["candidate_name"] = galeria[p]["name"]
             entradas[i]["candidate_score"] = round(float(v), 4)
             entradas[i]["dudosa"] = i in dudosas
+            # Giro de la cara (0 = de frente; ±0.3 o más = bastante de lado): nariz respecto al centro de los ojos.
+            f = orden[i]
+            ojos = max(float(np.hypot(f[6] - f[4], f[7] - f[5])), 1e-6)
+            entradas[i]["giro"] = round((float(f[8]) - (float(f[4]) + float(f[6])) / 2) / ojos, 3)
     # Quita manos, ropa y lámparas que YuNet marcó y nadie reconoció.
     # Las reconocidas no se tocan → presentes/ausentes iguales.
     from ia import verificar_caras as _vc

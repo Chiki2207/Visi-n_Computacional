@@ -640,7 +640,7 @@ function mostrarLista(a, volver) {
     if (!rev.length) { zonaRevisar.replaceChildren(); return; }
     zonaRevisar.replaceChildren(el("section", { class: "glass pad stack fade-in" },
       el("div", {}, el("h2", { class: "brand h2", text: "¿Están en la foto?" }),
-        el("p", { class: "muted small", style: { margin: "4px 0 0" }, text: "Caras lejanas que se parecen a estos estudiantes. Compare y confirme." })),
+        el("p", { class: "muted small", style: { margin: "4px 0 0" }, text: "Caras lejanas o de lado que se parecen a estos estudiantes. Compare y confirme." })),
       el("div", { class: "grid2" }, rev.map((r) => el("div", { class: "revisar-card" },
         el("figure", {}, recorte(r.bbox), el("figcaption", { text: "En la foto" })),
         el("figure", {}, imgDe(selfie(r), { alt: `Foto de ${r.nombre}` }), el("figcaption", { text: "Su foto" })),
@@ -700,7 +700,7 @@ function mostrarLista(a, volver) {
   function pintarAvisos() {
     const v = regs.filter((r) => claseDe(r) === "revisar").length;
     const avisos = [];
-    if (v) avisos.push(el("p", { class: "msg msg-warn", text: `${v === 1 ? "1 cara lejana se parece" : `${v} caras lejanas se parecen`} a estudiantes de la lista: confírmelo abajo en «¿Están en la foto?».`
+    if (v) avisos.push(el("p", { class: "msg msg-warn", text: `${v === 1 ? "1 cara (lejana o de lado) se parece" : `${v} caras (lejanas o de lado) se parecen`} a estudiantes de la lista: confírmelo abajo en «¿Están en la foto?».`
       + (a.lado_foto && a.lado_foto <= 1600 ? ` La foto llegó comprimida (${a.lado_foto} px): mándela como documento para que salgan solas.` : "") }));
     if (a.de_la_ventana) avisos.push(el("p", { class: "msg msg-ok", text: "Esta lista se hizo desde el programa del computador." }));
     zonaAvisos.replaceChildren(...avisos);
