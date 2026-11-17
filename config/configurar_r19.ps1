@@ -44,6 +44,12 @@ $env:SEGUNDO_NIVEL = "1"
 $env:SEGUNDO_NOTA = "0.33"
 $env:SEGUNDO_MARGEN = "0.18"
 $env:SEGUNDO_MAX_PX = "20"
+# Caras de menos de 32 px: también se compara la cara con contraste local (CLAHE) y se usa, por modelo y
+# por alumno, la nota más alta de las dos. No inventa rasgos. Medido con el motor completo en las 73
+# fotos-escala del banco (2026-11-17): 704 -> 707 nombres (+3 caras lejanas de 11-13 px), 0 equivocados,
+# 0 perdidos; contra las listas de otras clases y contra la lista sin los presentes, 0 nombres nuevos.
+$env:REALCE_CLAHE = "1"
+$env:REALCE_PX = "32"
 $env:VERIFICAR_CARAS = "1"
 $env:KR_CONSENSO = "1"
 # Mismo piso que el umbral: la pasada de los 3 modelos no baja el listón.

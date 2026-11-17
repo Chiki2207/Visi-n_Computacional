@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import cv2
 import numpy as np
 
 from ia.detectar_caras import calidad_de_cara, ordenar_por_calidad
@@ -103,6 +104,19 @@ SEGUNDO_NIVEL = _os.environ.get("SEGUNDO_NIVEL", "1") == "1"
 SEGUNDO_NOTA = float(_os.environ.get("SEGUNDO_NOTA", "0.33"))
 SEGUNDO_MARGEN = float(_os.environ.get("SEGUNDO_MARGEN", "0.18"))
 SEGUNDO_MAX_PX = float(_os.environ.get("SEGUNDO_MAX_PX", "20"))
+
+# Caras chicas: también se compara la cara con CONTRASTE LOCAL (CLAHE) y se queda, por modelo y por alumno,
+# la nota más alta de las dos. No inventa rasgos (no es restauración con IA). Se activa en la configuración
+# de la versión (config/configurar_r19.ps1, con lo medido); sin ella queda apagado.
+REALCE_CLAHE = _os.environ.get("REALCE_CLAHE", "0") == "1"
+REALCE_PX = float(_os.environ.get("REALCE_PX", "32"))
+
+
+def _con_clahe(imagen: np.ndarray) -> np.ndarray:
+    lab_ = cv2.cvtColor(imagen, cv2.COLOR_BGR2LAB)
+    l_, a_, b_ = cv2.split(lab_)
+    l_ = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l_)
+    return cv2.cvtColor(cv2.merge([l_, a_, b_]), cv2.COLOR_LAB2BGR)
 # Anti-logo / anti-textura GENERAL (no por foto / sin overfitting a un logo):
 # 1) Caja >= GEO_VETO_PX con geometría YuNet inválida → ni se embebe.
 # 2) Caja < GEO_VETO_PX con match flojo (sim < umbral+EXTRA) → se desasigna
@@ -481,6 +495,19 @@ def comparar_foto_grupal(
     else:
         huellas = [cara_a_embedding(imagen, fila, reconocedor, usar_tta=True) for fila in filas_huella]
 
+    # Caras chicas: segunda huella con contraste local (ver REALCE_CLAHE).
+    realzadas: dict[int, Any] = {}
+    if REALCE_CLAHE and getattr(reconocedor, "partes", 2) == 3:
+        chicas = [k for k, i in enumerate(con_huella) if min(float(orden[i][2]), float(orden[i][3])) < REALCE_PX]
+        if chicas:
+            img_r = _con_clahe(imagen)
+            filas_r = [filas_huella[k] for k in chicas]
+            if hasattr(reconocedor, "embeddings_espejo") and "embedding_espejo" not in vars(reconocedor):
+                h_r = reconocedor.embeddings_espejo(img_r, filas_r)
+            else:
+                h_r = [reconocedor.embedding_espejo(img_r, f) for f in filas_r]
+            realzadas = {con_huella[k]: h for k, h in zip(chicas, h_r)}
+
     scores: list[dict[str, float]] = [{} for _ in orden]
     sondas: list[Any] = [None] * len(orden)      # embedding de cada cara
     por_modelo: list[Any] = [None] * len(orden)  # nota de cada modelo, para la pasada en que los tres tienen que coincidir
@@ -490,6 +517,9 @@ def comparar_foto_grupal(
         sondas[i_cara] = sonda
         if getattr(reconocedor, "partes", 2) == 3:
             sc = _scores_partes(sonda, galeria, 3, w)
+            if i_cara in realzadas:          # por modelo y por alumno, la nota más alta de las dos
+                sc2 = _scores_partes(realzadas[i_cara], galeria, 3, w)
+                sc = [{p: max(sc[k][p], sc2[k][p]) for p in sc[k]} for k in range(3)]
             fus, crudo = _fusion_partes(sc, w, float(fila_cara[14]))
             scores[i_cara] = fus
             por_modelo[i_cara] = (sc, crudo)
