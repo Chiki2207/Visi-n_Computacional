@@ -80,6 +80,10 @@ Abrir http://localhost:3000.
 
 ## Producción
 
+- **Linux: librerías del sistema obligatorias** (el detector de rostros usa gráficos aunque no haya pantalla;
+  sin ellas cada huella falla). Debian/Ubuntu:
+  `sudo apt-get install -y libgl1 libegl1 libgles2 libglib2.0-0`
+  Comprobar: `.venv/bin/python -c "import mediapipe, cv2, onnxruntime; print('ok')"` y subir una foto de prueba.
 - Hacia internet solo el puerto **443** (y 80 para el certificado), con un proxy HTTPS (Caddy o nginx) que
   pase todo a `127.0.0.1:3000`. Los puertos 3000 y 8001 quedan cerrados en el firewall.
 - `IA_TOKEN` nueva y larga en `web/.env`. `DATOS` apunta a la carpeta de datos (por defecto `datos/`).
