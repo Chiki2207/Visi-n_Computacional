@@ -660,10 +660,9 @@ function mostrarLista(a, volver) {
         el("div", { class: "info" },
           el("div", { class: "nombre", text: r.nombre }),
           el("div", { class: "estado", text: t === "presente" ? "Presente" : t === "revisar" ? "¿Revisar?" : "Ausente" }),
-          el("div", { class: "muted xs", text: [t === "presente" && r.similitud != null ? `nota ${nota(r.similitud)}` : "", r.origen === "manual" ? "cambiado a mano" : "",
-            r.motivo === "repetir_selfie" ? "conviene repetir su foto" : "",
-            String(r.motivo || "").startsWith("registro_fallo") ? "sin huella: su foto no sirve, tómele otra" : "",
-            String(r.motivo || "").startsWith("sin_foto") ? "no tiene foto registrada" : ""].filter(Boolean).join(" · ") })),
+          // Solo si está o no; la nota y las sugerencias no se muestran. Únicamente se avisa si no tiene foto válida.
+          String(r.motivo || "").startsWith("registro_fallo") ? el("div", { class: "muted xs", text: "sin huella: su foto no sirve, tómele otra" })
+            : String(r.motivo || "").startsWith("sin_foto") ? el("div", { class: "muted xs", text: "no tiene foto registrada" }) : null),
         r.bbox && t !== "ausente" ? el("button", { class: "icon-btn", type: "button", title: "Ver en la foto", "aria-label": `Ver a ${r.nombre} en la foto`, onclick: () => { elegir(r); marco.scrollIntoView({ behavior: "smooth", block: "center" }); } }, icono("foco", 20)) : null,
         el("button", { class: `btn btn-sm ${otro === "presente" ? "btn-ok" : "btn-danger"}`, type: "button", text: otro === "presente" ? "Poner presente" : "Poner ausente", onclick: () => cambiar(r, otro) }));
     }));
@@ -675,7 +674,6 @@ function mostrarLista(a, volver) {
     const avisos = [];
     if (v) avisos.push(el("p", { class: "msg msg-warn", text: `${v === 1 ? "1 cara lejana se parece" : `${v} caras lejanas se parecen`} a estudiantes de la lista: confírmelo abajo en «¿Están en la foto?».`
       + (a.lado_foto && a.lado_foto <= 1600 ? ` La foto llegó comprimida (${a.lado_foto} px): mándela como documento para que salgan solas.` : "") }));
-    if (a.repetir_selfie && a.repetir_selfie.length) avisos.push(el("p", { class: "msg msg-warn", text: "Conviene tomar otra foto de registro a: " + a.repetir_selfie.map((x) => x.nombre).join(", ") }));
     if (a.de_la_ventana) avisos.push(el("p", { class: "msg msg-ok", text: "Esta lista se hizo desde el programa del computador." }));
     zonaAvisos.replaceChildren(...avisos);
   }
