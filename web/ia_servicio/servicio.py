@@ -61,6 +61,7 @@ from app.asistencia_core import (  # noqa: E402
     huella_de_selfie,
     obtener_motor,
 )
+from ia import comparar  # noqa: E402
 from ia import version as ia_version  # noqa: E402
 from ia.leer_imagen import bytes_a_imagen  # noqa: E402
 
@@ -68,6 +69,20 @@ IA_TOKEN = os.environ.get("IA_TOKEN", "").strip()
 IA_HOST = os.environ.get("IA_HOST", "127.0.0.1")
 IA_PUERTO = int(os.environ.get("IA_PUERTO", "8001"))
 IA_MAX_MB = float(os.environ.get("IA_MAX_MB", "40"))
+
+# Los datos de la clase (huellas de todos los alumnos) llegan como campo de texto "datos" y, con
+# muchos alumnos, pasan de 1 MB: el límite que Starlette pone por defecto a cada campo del formulario
+# ("Part exceeded maximum size of 1024KB"). Se sube ese límite al mismo tamaño máximo de la foto.
+from starlette.requests import Request as _Request  # noqa: E402
+
+_form_original = _Request.form
+
+
+def _form_sin_limite_1mb(self, *, max_files=1000, max_fields=1000, max_part_size=int(IA_MAX_MB * 1024 * 1024)):
+    return _form_original(self, max_files=max_files, max_fields=max_fields, max_part_size=max_part_size)
+
+
+_Request.form = _form_sin_limite_1mb
 VISTA_SELFIE_PX = 640
 
 
@@ -153,10 +168,15 @@ async def registro(foto: UploadFile = File(...)) -> dict:
     t0 = time.perf_counter()
     def trabajo():
         with _cerrojo:
-            return huella_de_selfie(obtener_motor(), datos), bytes_a_imagen(datos)
+            motor = obtener_motor()
+            reg = huella_de_selfie(motor, datos)
+            # La huella de la cara en blanco y negro (caras lejanas, ver REALCE_GRIS): se saca aquí una vez
+            # y la web la guarda con la normal, así pasar lista no la tiene que calcular.
+            gris = comparar.huella_gris_registro(reg["cara"], motor.reconocedor_onnx) if comparar.REALCE_GRIS else None
+            return reg, gris, bytes_a_imagen(datos)
 
     try:
-        reg, imagen = await run_in_threadpool(trabajo)
+        reg, gris, imagen = await run_in_threadpool(trabajo)
     except ValueError as ex:
         raise HTTPException(422, str(ex)) from ex
     except Exception as ex:  # noqa: BLE001  (que el servidor web vea el motivo, no un 500 mudo)
@@ -174,6 +194,7 @@ async def registro(foto: UploadFile = File(...)) -> dict:
         "huella": _b64(huella.tobytes()),
         "dim": int(huella.size),
         "cara_png": _b64(png.tobytes()),
+        "huella_gris": _b64(np.asarray(gris, dtype="<f8").tobytes()) if gris is not None else None,
         "caras_en_foto": reg["caras_en_foto"],
         "vista_jpg": _b64(_jpg(vista, 88)),
         "segundos": round(time.perf_counter() - t0, 2),
@@ -184,7 +205,7 @@ async def registro(foto: UploadFile = File(...)) -> dict:
 async def pasar_lista(foto: UploadFile = File(...), datos: str = Form(...)) -> dict:
     """Foto grupal + alumnos registrados → la lista, igual que la ventana.
 
-    datos (JSON): {"alumnos": [{"id", "nombre", "huella", "cara_png", "version_huella"}],
+    datos (JSON): {"alumnos": [{"id", "nombre", "huella", "cara_png", "huella_gris" (opcional), "version_huella"}],
                    "fallos": [{"id", "nombre", "motivo"}], "umbral": null}
     """
     foto_bytes = await _leer(foto)
@@ -200,7 +221,12 @@ async def pasar_lista(foto: UploadFile = File(...), datos: str = Form(...)) -> d
         cara = cv2.imdecode(np.frombuffer(base64.b64decode(a["cara_png"]), np.uint8), cv2.IMREAD_UNCHANGED)
         if cara is None or len(emb) != 1536:
             raise HTTPException(422, f"Registro dañado de {a.get('nombre')}")
-        personas.append({"id": str(a["id"]), "name": a["nombre"], "embeddings": [emb], "cara": cara})
+        persona = {"id": str(a["id"]), "name": a["nombre"], "embeddings": [emb], "cara": cara}
+        if a.get("huella_gris"):  # sin ella (o dañada) el motor la calcula de la cara: mismo resultado, más lento
+            gris = np.frombuffer(base64.b64decode(a["huella_gris"]), dtype="<f8")
+            if gris.size == 1536 and np.isfinite(gris).all():
+                persona["huella_gris"] = gris
+        personas.append(persona)
         estudiantes.append(SimpleNamespace(id=str(a["id"]), nombre=a["nombre"], ruta_imagen=None))
     fallos = []
     for f in pedido.get("fallos") or []:

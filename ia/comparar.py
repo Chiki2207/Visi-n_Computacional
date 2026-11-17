@@ -112,6 +112,44 @@ REALCE_CLAHE = _os.environ.get("REALCE_CLAHE", "0") == "1"
 REALCE_PX = float(_os.environ.get("REALCE_PX", "32"))
 
 
+# Caras chicas: también en blanco y negro, contra la foto de registro en blanco y negro (quita el tinte de
+# la luz y las paredes del salón). Por modelo y por alumno, la nota más alta. Lo enciende config r19 (medido ahí).
+REALCE_GRIS = _os.environ.get("REALCE_GRIS", "0") == "1"
+
+
+def _gris(imagen: np.ndarray) -> np.ndarray:
+    return cv2.cvtColor(cv2.cvtColor(imagen, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+
+
+def huella_gris_registro(cara: np.ndarray, reconocedor) -> np.ndarray:
+    """Huella de registro (1536 números) de la cara de registro alineada, en blanco y negro: la misma función
+    del registro normal. Cuesta lo mismo que la huella normal (~3 s en CPU) → la web la guarda con ella."""
+    from ia.mejoras import embedding_registro_de_cara
+
+    return np.asarray(embedding_registro_de_cara(_gris(np.ascontiguousarray(cara)), reconocedor))[:1536]
+
+
+# Si no viene guardada (ventana de escritorio), se calcula una vez por alumno mientras el programa siga
+# abierto: la cara de registro alineada es la misma en cada lista → la misma plantilla.
+_PLANTILLAS_GRIS: dict = {}
+
+
+def plantilla_gris(cara: np.ndarray, reconocedor, guardada=None) -> list[np.ndarray]:
+    if guardada is not None and np.asarray(guardada).size == 1536:
+        return _partes(guardada, 3)
+    import hashlib
+
+    cara = np.ascontiguousarray(cara)
+    clave = (id(reconocedor), cara.shape, hashlib.blake2b(cara.tobytes(), digest_size=16).digest())
+    plantilla = _PLANTILLAS_GRIS.get(clave)
+    if plantilla is None:
+        plantilla = _partes(huella_gris_registro(cara, reconocedor), 3)
+        if len(_PLANTILLAS_GRIS) >= 5000:
+            _PLANTILLAS_GRIS.clear()
+        _PLANTILLAS_GRIS[clave] = plantilla
+    return plantilla
+
+
 def _con_clahe(imagen: np.ndarray) -> np.ndarray:
     lab_ = cv2.cvtColor(imagen, cv2.COLOR_BGR2LAB)
     l_, a_, b_ = cv2.split(lab_)
@@ -508,6 +546,22 @@ def comparar_foto_grupal(
                 h_r = [reconocedor.embedding_espejo(img_r, f) for f in filas_r]
             realzadas = {con_huella[k]: h for k, h in zip(chicas, h_r)}
 
+    # Caras chicas: también en BLANCO Y NEGRO contra la foto de registro en blanco y negro (ver REALCE_GRIS).
+    grises: dict[int, Any] = {}
+    gris_gal: dict[str, list] = {}
+    if REALCE_GRIS and getattr(reconocedor, "partes", 2) == 3 and personas and all(p.get("cara") is not None for p in personas):
+        chicas_g = [k for k, i in enumerate(con_huella) if min(float(orden[i][2]), float(orden[i][3])) < REALCE_PX]
+        if chicas_g:
+            for p in personas:               # la de registro en gris (guardada por la web, o se calcula)
+                gris_gal[p["id"]] = plantilla_gris(p["cara"], reconocedor, p.get("huella_gris"))
+            img_g = _gris(imagen)
+            filas_g = [filas_huella[k] for k in chicas_g]
+            if hasattr(reconocedor, "embeddings_espejo") and "embedding_espejo" not in vars(reconocedor):
+                h_g = reconocedor.embeddings_espejo(img_g, filas_g)
+            else:
+                h_g = [reconocedor.embedding_espejo(img_g, f) for f in filas_g]
+            grises = {con_huella[k]: _partes(h, 3) for k, h in zip(chicas_g, h_g)}
+
     scores: list[dict[str, float]] = [{} for _ in orden]
     sondas: list[Any] = [None] * len(orden)      # embedding de cada cara
     por_modelo: list[Any] = [None] * len(orden)  # nota de cada modelo, para la pasada en que los tres tienen que coincidir
@@ -520,6 +574,10 @@ def comparar_foto_grupal(
             if i_cara in realzadas:          # por modelo y por alumno, la nota más alta de las dos
                 sc2 = _scores_partes(realzadas[i_cara], galeria, 3, w)
                 sc = [{p: max(sc[k][p], sc2[k][p]) for p in sc[k]} for k in range(3)]
+            if i_cara in grises:             # gris contra gris: también la nota más alta
+                sg = grises[i_cara]
+                sc = [{p: (max(sc[k][p], float(gris_gal[p][k] @ sg[k])) if p in gris_gal else sc[k][p]) for p in sc[k]}
+                      for k in range(3)]
             fus, crudo = _fusion_partes(sc, w, float(fila_cara[14]))
             scores[i_cara] = fus
             por_modelo[i_cara] = (sc, crudo)

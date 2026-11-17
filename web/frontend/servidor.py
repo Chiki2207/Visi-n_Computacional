@@ -228,6 +228,8 @@ def _huella(ruta: Path, version: str) -> dict:
     try:
         r = _ia_post("/registro", 300, files={"foto": (ruta.name, datos)})
         d = {"sha256": sha, "version_huella": r["version_huella"], "huella": r["huella"], "cara_png": r["cara_png"]}
+        if r.get("huella_gris"):  # la de la cara en blanco y negro (caras lejanas): se manda con la normal
+            d["huella_gris"] = r["huella_gris"]
     except IAError as ex:
         d = {"sha256": sha, "version_huella": version, "error": str(ex)}
     a = _archivo_huella(ruta)

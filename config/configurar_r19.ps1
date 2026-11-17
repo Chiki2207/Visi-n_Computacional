@@ -50,6 +50,11 @@ $env:SEGUNDO_MAX_PX = "20"
 # 0 perdidos; contra las listas de otras clases y contra la lista sin los presentes, 0 nombres nuevos.
 $env:REALCE_CLAHE = "1"
 $env:REALCE_PX = "32"
+# Las mismas caras chicas también en BLANCO Y NEGRO contra la foto de registro en blanco y negro (quita el
+# tinte de la luz y las paredes del salón); por modelo y por alumno, la nota más alta. Medido con el motor
+# completo (2026-11-17), sobre lo de arriba: 707 -> 713 nombres (+6 caras lejanas de 10-17 px), 0
+# equivocados, 0 perdidos; contra las listas de otras clases y sin los presentes, 0 nombres nuevos.
+$env:REALCE_GRIS = "1"
 $env:VERIFICAR_CARAS = "1"
 $env:KR_CONSENSO = "1"
 # Mismo piso que el umbral: la pasada de los 3 modelos no baja el listón.
