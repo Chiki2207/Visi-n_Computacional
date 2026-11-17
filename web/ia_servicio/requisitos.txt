@@ -1,0 +1,5 @@
+# Servicio de IA: el motor del proyecto (requisitos.txt de la raíz) + el servidor HTTP.
+-r ../../requisitos.txt
+fastapi==0.163.1
+uvicorn==0.54.0
+python-multipart==0.0.34

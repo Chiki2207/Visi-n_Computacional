@@ -1,0 +1,5 @@
+# Secretos y entornos: nunca al repositorio
+.env
+usuarios.json
+frontend/.venv/
+__pycache__/

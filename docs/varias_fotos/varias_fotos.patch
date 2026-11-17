@@ -1,0 +1,581 @@
+--- a/app/asistencia_core.py
++++ b/app/asistencia_core.py
+@@ -6,7 +6,7 @@
+ from dataclasses import dataclass, field
+ from datetime import datetime
+ from pathlib import Path
+-from typing import Any
++from typing import Any, Sequence
+ 
+ from app.excel_clase import Estudiante, cargar_estudiantes, guardar_lista
+ from ia.motor_facial import MotorFacial
+@@ -84,13 +84,19 @@
+ @dataclass
+ class ResultadoAsistencia:
+     clase: str
+-    foto_grupal: Path
++    foto_grupal: Path            # la primera foto
+     excel_clase: Path
+-    faces_detected: int
++    faces_detected: int          # rostros sumando todas las fotos
+     umbral: float
+     filas: list[dict] = field(default_factory=list)
+-    detecciones: list[dict] = field(default_factory=list)
++    detecciones: list[dict] = field(default_factory=list)   # cada una dice en qué foto está ("foto")
+     excel_salida: Path | None = None
++    fotos: list[Path] = field(default_factory=list)         # todas las fotos de la lista, en orden
++
++    @property
++    def texto_fotos(self) -> str:
++        """Las fotos usadas, para guardar en el Excel."""
++        return "; ".join(str(f) for f in (self.fotos or [self.foto_grupal]))
+ 
+     @property
+     def presentes(self) -> int:
+@@ -112,9 +118,24 @@
+     return _motor
+ 
+ 
++def _lista_fotos(foto_grupal: Path | Sequence[Path]) -> list[Path]:
++    """Una foto o varias → lista sin repetidas, en el orden dado."""
++    fotos = [foto_grupal] if isinstance(foto_grupal, (str, Path)) else list(foto_grupal)
++    salida: list[Path] = []
++    for foto in fotos:
++        ruta = Path(foto).resolve()
++        if not ruta.is_file():
++            raise FileNotFoundError(f"No existe la foto grupal: {ruta}")
++        if ruta not in salida:
++            salida.append(ruta)
++    if not salida:
++        raise ValueError("Falta la foto grupal.")
++    return salida
++
++
+ def pasar_lista(
+     excel_clase: Path,
+-    foto_grupal: Path,
++    foto_grupal: Path | Sequence[Path],
+     *,
+     umbral: float | None = None,
+     guardar_excel: bool = True,
+@@ -122,11 +143,15 @@
+     motor: MotorFacial | None = None,
+     on_progreso: Any = None,
+ ) -> ResultadoAsistencia:
+-    """Misma lógica que la web: registra huellas del Excel y reconoce en la foto grupal."""
++    """Registra huellas del Excel y reconoce en la foto grupal.
++
++    Con varias fotos de la misma clase, cada foto se analiza aparte con las mismas reglas
++    (nada se afloja) y está presente quien sale con nombre en al menos una.
++    Medido en el banco de pruebas (dos fotos de la clase lejos, caras de ~12–18 px):
++    de 83 % a 88 % y de 52 % a 57 % de alumnos con nombre, sin ningún ausente marcado.
++    """
+     excel_clase = excel_clase.resolve()
+-    foto_grupal = foto_grupal.resolve()
+-    if not foto_grupal.is_file():
+-        raise FileNotFoundError(f"No existe la foto grupal: {foto_grupal}")
++    fotos = _lista_fotos(foto_grupal)
+ 
+     def prog(msg: str) -> None:
+         if on_progreso:
+@@ -138,20 +163,45 @@
+     prog("Generando huellas desde fotos del Excel…")
+     personas, fallos = registrar_galeria(m, estudiantes)
+     prog(f"Huellas OK={len(personas)}  fallos={len(fallos)}")
+-    prog("Analizando foto grupal…")
+-    resultado = m.quien_esta_y_quien_no(
+-        foto_grupal.read_bytes(), personas, umbral=umbral
+-    )
+-
+-    presentes = {p["id"] for p in resultado.get("present", [])}
+-    bboxes: dict[str, list] = {}
+-    sims: dict[str, float] = {}
+-    for match in resultado.get("matches") or []:
+-        if match.get("matched") and match.get("person_id"):
++
++    # Por alumno, la foto donde salió con la nota más alta (su recuadro y su nota).
++    mejor: dict[str, dict] = {}
++    detecciones: list[dict] = []
++    rostros = 0
++    umbral_usado = 0.0
++    for n, foto in enumerate(fotos, 1):
++        prog(f"Analizando foto {n} de {len(fotos)}: {foto.name}…" if len(fotos) > 1 else "Analizando foto grupal…")
++        resultado = m.quien_esta_y_quien_no(foto.read_bytes(), personas, umbral=umbral)
++        rostros += int(resultado.get("faces_detected") or 0)
++        umbral_usado = float(resultado.get("threshold") or 0)
++        for match in resultado.get("matches") or []:
++            detecciones.append(
++                {
++                    "bbox": match.get("bbox"),
++                    "matched": bool(match.get("matched")),
++                    "person_id": match.get("person_id"),
++                    "name": match.get("name"),
++                    "similarity": match.get("similarity"),
++                    "foto": str(foto),
++                }
++            )
++            if not (match.get("matched") and match.get("person_id")):
++                continue
+             pid = str(match["person_id"])
+-            sims[pid] = match.get("similarity")
+-            if isinstance(match.get("bbox"), (list, tuple)) and len(match["bbox"]) >= 4:
+-                bboxes[pid] = list(match["bbox"])
++            sim = match.get("similarity")
++            previo = mejor.get(pid)
++            if previo is not None and (sim is None or (previo["sim"] is not None and float(sim) <= float(previo["sim"]))):
++                continue
++            bbox = match.get("bbox")
++            mejor[pid] = {
++                "sim": sim,
++                "bbox": list(bbox) if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 else None,
++                "foto": str(foto),
++            }
++
++    presentes = set(mejor)
++    sims = {pid: d["sim"] for pid, d in mejor.items()}
++    bboxes = {pid: d["bbox"] for pid, d in mejor.items() if d["bbox"]}
+ 
+     filas = list(fallos)
+     ids_fallo = {f["id"] for f in fallos}
+@@ -169,6 +219,7 @@
+                     "motivo": "",
+                     "bbox": bboxes.get(est.id),
+                     "foto": foto_rel,
++                    "foto_grupal": mejor[est.id]["foto"],   # en qué foto grupal está su recuadro
+                     "origen": "ai",
+                 }
+             )
+@@ -195,18 +246,6 @@
+         )
+     )
+ 
+-    detecciones = []
+-    for match in resultado.get("matches") or []:
+-        detecciones.append(
+-            {
+-                "bbox": match.get("bbox"),
+-                "matched": bool(match.get("matched")),
+-                "person_id": match.get("person_id"),
+-                "name": match.get("name"),
+-                "similarity": match.get("similarity"),
+-            }
+-        )
+-
+     out_path = None
+     if guardar_excel:
+         if salida is None:
+@@ -216,24 +255,26 @@
+             )
+         else:
+             out_path = salida.resolve()
++    res = ResultadoAsistencia(
++        clase=excel_clase.parent.name,
++        foto_grupal=fotos[0],
++        excel_clase=excel_clase,
++        faces_detected=rostros,
++        umbral=umbral_usado,
++        filas=filas,
++        detecciones=detecciones,
++        excel_salida=out_path,
++        fotos=fotos,
++    )
++    if guardar_excel:
+         guardar_lista(
+             out_path,
+-            clase=excel_clase.parent.name,
+-            foto_grupal=str(foto_grupal),
+-            umbral=float(resultado.get("threshold") or 0),
+-            faces_detected=int(resultado.get("faces_detected") or 0),
++            clase=res.clase,
++            foto_grupal=res.texto_fotos,
++            umbral=res.umbral,
++            faces_detected=res.faces_detected,
+             filas=filas,
+             detecciones=detecciones,
+         )
+         prog(f"Lista guardada: {out_path}")
+-
+-    return ResultadoAsistencia(
+-        clase=excel_clase.parent.name,
+-        foto_grupal=foto_grupal,
+-        excel_clase=excel_clase,
+-        faces_detected=int(resultado.get("faces_detected") or 0),
+-        umbral=float(resultado.get("threshold") or 0),
+-        filas=filas,
+-        detecciones=detecciones,
+-        excel_salida=out_path,
+-    )
++    return res
+--- a/app/excel_clase.py
++++ b/app/excel_clase.py
+@@ -91,8 +91,9 @@
+     detecciones: list[dict] | None = None,
+ ) -> Path:
+     """
+-    filas: [{id, nombre, estado, similitud, motivo}]
+-    detecciones opcionales: cajas de la IA para revisión.
++    filas: [{id, nombre, estado, similitud, motivo, origen, foto_grupal}]
++    foto_grupal: la foto (o las fotos, separadas por "; ") con que se pasó lista.
++    detecciones opcionales: cajas de la IA para revisión (con la foto de cada una).
+     """
+     salida = salida.resolve()
+     salida.parent.mkdir(parents=True, exist_ok=True)
+@@ -100,7 +101,7 @@
+     wb = Workbook()
+     ws = wb.active
+     ws.title = "lista"
+-    ws.append(["id", "nombre", "estado", "similitud", "motivo", "origen"])
++    ws.append(["id", "nombre", "estado", "similitud", "motivo", "origen", "foto_grupal"])
+     for f in filas:
+         sim = f.get("similitud")
+         ws.append(
+@@ -111,6 +112,7 @@
+                 None if sim is None else round(float(sim), 4),
+                 f.get("motivo") or "",
+                 f.get("origen") or "ai",
++                Path(f["foto_grupal"]).name if f.get("foto_grupal") and f.get("estado") == "presente" else "",
+             ]
+         )
+ 
+@@ -125,7 +127,7 @@
+ 
+     if detecciones:
+         wd = wb.create_sheet("detecciones")
+-        wd.append(["i", "matched", "id", "nombre", "similitud", "x1", "y1", "x2", "y2"])
++        wd.append(["i", "matched", "id", "nombre", "similitud", "x1", "y1", "x2", "y2", "foto"])
+         for i, d in enumerate(detecciones, 1):
+             bb = d.get("bbox") or [None, None, None, None]
+             wd.append(
+@@ -139,6 +141,7 @@
+                     bb[1],
+                     bb[2],
+                     bb[3],
++                    Path(d["foto"]).name if d.get("foto") else "",
+                 ]
+             )
+ 
+--- a/app/pasar_lista.py
++++ b/app/pasar_lista.py
+@@ -4,6 +4,9 @@
+ Uso:
+   . .\config\configurar_r19.ps1
+   python app/pasar_lista.py --clase "datos/clases/primera prueba/estudiantes.xlsx" --foto "datos/clases/primera prueba/foto_grupal.webp"
++
++Varias fotos de la misma clase (presente = sale con nombre en al menos una):
++  python app/pasar_lista.py --clase ... --foto foto1.jpg foto2.jpg
+ """
+ 
+ from __future__ import annotations
+@@ -22,27 +25,29 @@
+ def main() -> int:
+     ap = argparse.ArgumentParser(description="Pasar lista (Excel + foto grupal)")
+     ap.add_argument("--clase", type=Path, required=True)
+-    ap.add_argument("--foto", type=Path, required=True)
++    ap.add_argument("--foto", type=Path, nargs="+", required=True,
++                    help="una o varias fotos de la misma clase")
+     ap.add_argument("--salida", type=Path, default=None)
+     ap.add_argument("--umbral", type=float, default=None)
+     args = ap.parse_args()
+ 
+     excel_clase = args.clase if args.clase.is_absolute() else (ROOT / args.clase)
+-    foto = args.foto if args.foto.is_absolute() else (ROOT / args.foto)
+-    if not foto.is_file():
+-        print(f"[ERROR] No existe la foto grupal: {foto}")
+-        return 1
++    fotos = [f if f.is_absolute() else (ROOT / f) for f in args.foto]
++    for foto in fotos:
++        if not foto.is_file():
++            print(f"[ERROR] No existe la foto grupal: {foto}")
++            return 1
+ 
+     print(f"[CLASE] {excel_clase}")
+     res = pasar_lista(
+         excel_clase,
+-        foto,
++        fotos,
+         umbral=args.umbral,
+         salida=args.salida,
+         on_progreso=print,
+     )
+     print(
+-        f"[OK] rostros={res.faces_detected}  "
++        f"[OK] fotos={len(res.fotos)}  rostros={res.faces_detected}  "
+         f"presentes={res.presentes}  ausentes={res.ausentes}"
+     )
+     if res.excel_salida:
+--- a/ui/ventana_lista.py
++++ b/ui/ventana_lista.py
+@@ -1,6 +1,9 @@
+ """
+ Interfaz de escritorio: Excel + foto grupal → lista, y ver en la foto
+ dónde está cada presente / cada rostro detectado (como en la web).
++
++Se pueden elegir varias fotos de la misma clase (Ctrl+clic): cada una se analiza
++con las mismas reglas y está presente quien sale con nombre en al menos una.
+ """
+ 
+ from __future__ import annotations
+@@ -28,9 +31,11 @@
+         self.minsize(960, 600)
+ 
+         self.excel_path: Path | None = None
+-        self.foto_path: Path | None = None
++        self.fotos: list[Path] = []                  # fotos grupales elegidas (una o varias)
+         self.resultado: ResultadoAsistencia | None = None
+         self._img_orig: Image.Image | None = None
++        self._foto_vista: Path | None = None         # la foto que se ve ahora
++        self._imagenes: dict[Path, Image.Image] = {}
+         self._img_tk: ImageTk.PhotoImage | None = None
+         self._focus_bbox: list[float] | None = None
+         self._focus_label = ""
+@@ -52,7 +57,7 @@
+         self.lbl_excel = ttk.Label(top, text="(sin Excel)", foreground="#666")
+         self.lbl_excel.pack(side=tk.LEFT, padx=8)
+ 
+-        ttk.Button(top, text="2. Foto grupal…", command=self._elegir_foto).pack(
++        ttk.Button(top, text="2. Foto(s) grupal(es)…", command=self._elegir_foto).pack(
+             side=tk.LEFT, padx=4
+         )
+         self.lbl_foto = ttk.Label(top, text="(sin foto)", foreground="#666")
+@@ -63,7 +68,12 @@
+         )
+         self.btn_pasar.pack(side=tk.RIGHT, padx=4)
+ 
+-        self.lbl_estado = ttk.Label(self, text="Elige Excel y foto grupal.", padding=6)
++        self.lbl_estado = ttk.Label(
++            self,
++            text="Elige Excel y foto grupal. Puedes elegir 2 o 3 fotos de la misma clase "
++            "(Ctrl+clic): se juntan los presentes y reconoce más caras lejanas.",
++            padding=6,
++        )
+         self.lbl_estado.pack(fill=tk.X)
+ 
+         mid = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
+@@ -153,8 +163,8 @@
+             self.lbl_excel.config(text=self.excel_path.name, foreground="#0b6b3a")
+             # Si hay foto_grupal.webp al lado del Excel, sugerirla
+             sug = self.excel_path.parent / "foto_grupal.webp"
+-            if sug.is_file() and self.foto_path is None:
+-                self.foto_path = sug
++            if sug.is_file() and not self.fotos:
++                self.fotos = [sug]
+                 self.lbl_foto.config(text=sug.name, foreground="#0b6b3a")
+                 self._cargar_imagen(sug)
+ 
+@@ -166,32 +176,68 @@
+                 ini = alt
+         else:
+             ini = ROOT / "datos" / "clases"
+-        path = filedialog.askopenfilename(
+-            title="Foto grupal",
++        paths = filedialog.askopenfilenames(
++            title="Foto grupal (Ctrl+clic para elegir varias de la misma clase)",
+             initialdir=str(ini if Path(ini).is_dir() else ROOT),
+             filetypes=[
+                 ("Imágenes", "*.webp *.jpg *.jpeg *.png"),
+                 ("Todos", "*.*"),
+             ],
+         )
+-        if path:
+-            self.foto_path = Path(path)
+-            self.lbl_foto.config(text=self.foto_path.name, foreground="#0b6b3a")
+-            self._cargar_imagen(self.foto_path)
++        if paths:
++            self.fotos = [Path(p) for p in paths]
++            if len(self.fotos) == 1:
++                texto = self.fotos[0].name
++            else:
++                texto = f"{len(self.fotos)} fotos: " + ", ".join(f.name for f in self.fotos)
++                if len(texto) > 70:
++                    texto = texto[:67] + "…"
++            self.lbl_foto.config(text=texto, foreground="#0b6b3a")
++            self._cargar_imagen(self.fotos[0])
++
++    def _abrir(self, path: Path) -> Image.Image:
++        """La foto ya abierta (se guarda para no leerla del disco cada vez que se cambia de foto)."""
++        path = Path(path)
++        if path not in self._imagenes:
++            self._imagenes[path] = Image.open(path).convert("RGB")
++        return self._imagenes[path]
+ 
+     def _cargar_imagen(self, path: Path) -> None:
+         try:
+-            self._img_orig = Image.open(path).convert("RGB")
++            self._img_orig = self._abrir(path)
++            self._foto_vista = Path(path)
+             self._focus_bbox = None
+             self._focus_label = ""
+             self._redibujar_foto()
+         except Exception as ex:
+             messagebox.showerror("Foto", f"No se pudo abrir la imagen:\n{ex}")
+ 
++    def _ver_foto(self, path: str | Path | None) -> None:
++        """Muestra esa foto grupal (sin tocar la marca). Sirve cuando la lista se pasó con varias fotos."""
++        if not path or (self._foto_vista is not None and Path(path) == self._foto_vista):
++            return
++        try:
++            self._img_orig = self._abrir(Path(path))
++            self._foto_vista = Path(path)
++        except Exception as ex:
++            messagebox.showerror("Foto", f"No se pudo abrir la imagen:\n{ex}")
++
++    def _texto_estado(self) -> str:
++        res = self.resultado
++        if not res:
++            return ""
++        n_fotos = len(res.fotos) if res.fotos else 1
++        return (
++            f"{res.clase}: "
++            + (f"{n_fotos} fotos · " if n_fotos > 1 else "")
++            + f"{res.faces_detected} rostros · {res.presentes} presentes · {res.ausentes} ausentes"
++            + (f" · guardado {res.excel_salida.name}" if res.excel_salida else "")
++        )
++
+     def _pasar_lista(self) -> None:
+         if self._busy:
+             return
+-        if not self.excel_path or not self.foto_path:
++        if not self.excel_path or not self.fotos:
+             messagebox.showwarning(
+                 "Falta algo", "Elige el Excel de clase y la foto grupal."
+             )
+@@ -199,12 +245,13 @@
+         self._busy = True
+         self.btn_pasar.config(state=tk.DISABLED)
+         self.lbl_estado.config(text="Pasando lista… (puede tardar)")
++        fotos = list(self.fotos)
+ 
+         def trabajo() -> None:
+             try:
+                 res = pasar_lista(
+                     self.excel_path,
+-                    self.foto_path,
++                    fotos,
+                     on_progreso=lambda m: self.after(
+                         0, lambda: self.lbl_estado.config(text=m)
+                     ),
+@@ -228,13 +275,7 @@
+         self._cargar_imagen(res.foto_grupal)
+         self._llenar_lista()
+         self._det_index = 0
+-        self.lbl_estado.config(
+-            text=(
+-                f"{res.clase}: {res.faces_detected} rostros · "
+-                f"{res.presentes} presentes · {res.ausentes} ausentes"
+-                + (f" · guardado {res.excel_salida.name}" if res.excel_salida else "")
+-            )
+-        )
++        self.lbl_estado.config(text=self._texto_estado())
+         if res.detecciones:
+             self._mostrar_deteccion(0)
+ 
+@@ -315,17 +356,7 @@
+         self._llenar_lista(seleccionar=sid)
+         self._mostrar_preview_alumno(fila)
+         self._guardar_lista_actual()
+-        self.lbl_estado.config(
+-            text=(
+-                f"{self.resultado.clase}: {self.resultado.faces_detected} rostros · "
+-                f"{self.resultado.presentes} presentes · {self.resultado.ausentes} ausentes"
+-                + (
+-                    f" · {self.resultado.excel_salida.name}"
+-                    if self.resultado.excel_salida
+-                    else ""
+-                )
+-            )
+-        )
++        self.lbl_estado.config(text=self._texto_estado())
+ 
+     def _guardar_lista_actual(self) -> None:
+         if not self.resultado or not self.resultado.excel_salida:
+@@ -335,7 +366,7 @@
+         guardar_lista(
+             self.resultado.excel_salida,
+             clase=self.resultado.clase,
+-            foto_grupal=str(self.resultado.foto_grupal),
++            foto_grupal=self.resultado.texto_fotos,
+             umbral=float(self.resultado.umbral),
+             faces_detected=int(self.resultado.faces_detected),
+             filas=self.resultado.filas,
+@@ -386,13 +417,16 @@
+         if not bbox or len(bbox) < 4:
+             return
+         sid = str(fila.get("id") or "")
++        self._ver_foto(fila.get("foto_grupal"))
+         self._focus_bbox = [float(x) for x in bbox[:4]]
+         sim = fila.get("similitud")
+         extra = f"  sim={float(sim):.3f}" if sim is not None else ""
+         self._focus_label = f"{fila.get('nombre')}{extra}"
+         if self.resultado:
+             for i, d in enumerate(self.resultado.detecciones):
+-                if str(d.get("person_id") or "") == sid:
++                if str(d.get("person_id") or "") == sid and (
++                    not fila.get("foto_grupal") or d.get("foto") == fila.get("foto_grupal")
++                ):
+                     self._det_index = i
+                     break
+         self._actualizar_lbl_det()
+@@ -463,6 +497,7 @@
+         if not bb or len(bb) < 4:
+             return
+         self._det_index = i
++        self._ver_foto(d.get("foto"))
+         self._focus_bbox = [float(x) for x in bb[:4]]
+         if d.get("matched") and d.get("name"):
+             sim = d.get("similarity")
+@@ -483,7 +518,13 @@
+             self.lbl_det.config(text="")
+             return
+         n = len(self.resultado.detecciones)
+-        self.lbl_det.config(text=f"Rostro {self._det_index + 1} / {n}")
++        texto = f"Rostro {self._det_index + 1} / {n}"
++        fotos = self.resultado.fotos
++        if len(fotos) > 1 and self._foto_vista is not None:
++            k = next((j for j, f in enumerate(fotos, 1) if Path(f) == self._foto_vista), None)
++            if k:
++                texto += f"  ·  foto {k} de {len(fotos)} ({self._foto_vista.name})"
++        self.lbl_det.config(text=texto)
+ 
+     def _quitar_marca(self) -> None:
+         self._focus_bbox = None
+--- a/README.md
++++ b/README.md
+@@ -33,6 +33,11 @@
+   --clase "datos\clases\primera prueba\estudiantes.xlsx" `
+   --foto "datos\clases\primera prueba\foto_grupal.webp"
+ 
++# Varias fotos de la misma clase (presente = sale con nombre en al menos una)
++.\.venv\Scripts\python.exe app\pasar_lista.py `
++  --clase "datos\clases\primera prueba\estudiantes.xlsx" `
++  --foto "foto1.jpg" "foto2.jpg"
++
+ # Ventana
+ .\.venv\Scripts\python.exe lanzar_ui.py
+ ```
+--- a/ui/README.md
++++ b/ui/README.md
+@@ -11,6 +11,13 @@
+ ## Uso
+ 
+ 1. **Excel de clase…** → `datos/clases/<Clase>/estudiantes.xlsx` (si hay `foto_grupal.webp` al lado, se carga sola)
+-2. **Foto grupal…** (si hace falta otra)
++2. **Foto(s) grupal(es)…** → una foto, o 2–3 fotos de la misma clase con Ctrl+clic
+ 3. **Pasar lista**
+-4. Clic en la lista → ficha; **👁 Ver foto** → selfie grande; presente → marca en la grupal
++4. Clic en la lista → ficha; **👁 Ver foto** → selfie grande; presente → marca en la grupal (en la foto donde salió)
++
++### Varias fotos
++
++Cada foto se analiza con las mismas reglas; está presente quien sale con nombre en al menos una.
++Sirve cuando la clase está lejos: con dos fotos se reconocen más caras del fondo
++(medido: de 83 % a 88 % y de 52 % a 57 % de alumnos con nombre, sin ningún ausente marcado).
++Mejor si las fotos son desde puntos o momentos un poco distintos (alguien que sale tapado en una puede salir bien en otra).
+--- a/docs/SECUENCIA_IA.md
++++ b/docs/SECUENCIA_IA.md
+@@ -11,4 +11,6 @@
+ 7. **Asignar lista** → 1 cara = 1 persona + k-recíproco (`comparar.py` / `motor_facial.py`)
+ 8. **Caras tapadas por un monitor** → las que quedaron sin nombre y ya tenían un candidato claro se vuelven a comparar solo con la parte de arriba de la cara (frente, ojos y nariz) contra el registro tapado igual (`cara_tapada.py`). No baja el umbral: la media cara tiene que llegar al mismo 0.37 y ganarle claro al segundo.
+ 
++Con varias fotos de la misma clase (`app/asistencia_core.py` → `pasar_lista`), los pasos 1–8 se hacen con cada foto por separado y la lista junta los presentes: está presente quien sale con nombre en al menos una. No se afloja ninguna regla.
++
+ Entrada pública recomendada para explicar: `ia/motor_facial.py` → `MotorFacial`.

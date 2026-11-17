@@ -1,0 +1,29 @@
+# Entornos de Python (se crean con: python -m venv ...)
+.venv/
+venv/
+web/frontend/.venv/
+__pycache__/
+*.pyc
+
+# Datos de los estudiantes (fotos, huellas, listas): datos personales. NUNCA al repositorio.
+datos/*
+!datos/README.md
+
+# Laboratorio y pruebas (varios GB)
+tmp/
+
+# Secretos de la web
+web/.env
+web/usuarios.json
+
+# Modelos de IA: pesan hasta 260 MB y GitHub no acepta archivos de más de 100 MB.
+# Se copian aparte al servidor (ver models/README.md).
+models/*
+!models/README.md
+
+# Varios
+*.log
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
