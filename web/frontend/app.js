@@ -576,7 +576,9 @@ function mostrarLista(a, volver) {
   const zonaAvisos = el("div", { class: "stack" });
   const zonaRevisar = el("div");
   const zonaFilas = el("ul", { class: "filas" });
+  const zonaFicha = el("div");          // al tocar una cara: su cara en la foto + su foto registrada
   let elegido = null;
+  let verCaras = true;                  // «Ver sin caras» solo esconde los recuadros; no cambia nada guardado
 
   async function cambiar(r, estado) {
     try {
@@ -602,16 +604,16 @@ function mostrarLista(a, volver) {
 
   function pintarConteo() {
     const p = regs.filter((r) => claseDe(r) === "presente").length, v = regs.filter((r) => claseDe(r) === "revisar").length;
-    conteo.replaceChildren(el("span", { class: "chip chip-ok", text: `${p} presentes` }),
+    conteo.replaceChildren(...[el("span", { class: "chip chip-ok", text: `${p} presentes` }),
       v ? el("span", { class: "chip chip-warn", text: `${v} por revisar` }) : null,
       el("span", { class: "chip chip-bad", text: `${regs.length - p - v} ausentes` }),
-      el("span", { class: "chip chip-gris", text: `${a.rostros ?? 0} caras en la foto` }));
+      el("span", { class: "chip chip-gris", text: `${a.rostros ?? 0} caras en la foto` })].filter(Boolean));   // sin «null» en pantalla
   }
 
   function pintarCajas() {
     marco.querySelectorAll(".caja").forEach((n) => n.remove());
     if (!a.ancho && img.naturalWidth) { a.ancho = img.naturalWidth; a.alto = img.naturalHeight; }
-    if (!a.ancho) return;
+    if (!a.ancho || !verCaras) return;
     const usadas = new Set();
     const caja = (bb, tipo, etiqueta, alElegir, activa) => {
       const [x1, y1, x2, y2] = bb;
@@ -668,7 +670,33 @@ function mostrarLista(a, volver) {
     }));
   }
 
-  function elegir(r) { elegido = elegido === r ? null : r; pintarCajas(); pintarFilas(); }
+  function pintarFicha() {
+    const r = elegido;
+    if (!r || !r.bbox || !verCaras) { zonaFicha.replaceChildren(); return; }
+    const t = claseDe(r);
+    zonaFicha.replaceChildren(el("div", { class: `ficha-cara ficha-${t} fade-in` },
+      el("figure", {}, recorte(r.bbox), el("figcaption", { text: "En la foto" })),
+      el("figure", {}, imgDe(selfie(r), { alt: `Foto de ${r.nombre}` }), el("figcaption", { text: "Su foto" })),
+      el("div", { class: "pie row" },
+        el("div", { class: "grow" },
+          el("div", { class: "brand", style: { fontSize: "1.1rem" }, text: r.nombre }),
+          el("div", { class: "estado-ficha", text: t === "presente" ? "Presente" : t === "revisar" ? "¿Es esta persona? Confírmelo abajo" : "Ausente" })),
+        el("button", { class: "btn btn-ghost btn-sm", type: "button", text: "Cerrar", onclick: () => elegir(r) }))));
+  }
+  const botonCaras = el("button", { class: "btn btn-ghost btn-sm", type: "button", "aria-pressed": "false", onclick: () => {
+    verCaras = !verCaras;
+    if (!verCaras) elegido = null;
+    pintarCajas(); pintarFilas(); pintarFicha(); pintarBotonCaras();
+  } });
+  function pintarBotonCaras() {
+    botonCaras.replaceChildren(icono(verCaras ? "ojoNo" : "ojo", 18), verCaras ? "Ver sin caras" : "Ver con caras");
+    botonCaras.setAttribute("aria-pressed", String(!verCaras));
+  }
+  function elegir(r) {
+    elegido = elegido === r ? null : r;
+    if (elegido) verCaras = true;       // si estaban ocultas, al elegir a alguien vuelven
+    pintarCajas(); pintarFilas(); pintarFicha(); pintarBotonCaras();
+  }
   function pintarAvisos() {
     const v = regs.filter((r) => claseDe(r) === "revisar").length;
     const avisos = [];
@@ -677,7 +705,7 @@ function mostrarLista(a, volver) {
     if (a.de_la_ventana) avisos.push(el("p", { class: "msg msg-ok", text: "Esta lista se hizo desde el programa del computador." }));
     zonaAvisos.replaceChildren(...avisos);
   }
-  function pintar() { pintarConteo(); pintarAvisos(); pintarCajas(); pintarRevisar(); pintarFilas(); }
+  function pintar() { pintarConteo(); pintarAvisos(); pintarCajas(); pintarRevisar(); pintarFilas(); pintarFicha(); pintarBotonCaras(); }
 
   const descargar = el("button", { class: "btn btn-ghost btn-sm", type: "button", text: "Descargar lista", onclick: async () => {
     try {
@@ -692,11 +720,11 @@ function mostrarLista(a, volver) {
     el("div", { class: "fade-in", style: { marginTop: "22px" } }, volver,
       el("h1", { class: "brand h1", style: { marginTop: "6px" }, text: fechaCorta(a.creada) }),
       el("p", { class: "muted small", style: { margin: "2px 0 10px" }, text: primeraMayus(fechaLarga(a.creada)) }),
-      el("div", { class: "row", style: { gap: "8px" } }, descargar,
+      el("div", { class: "row", style: { gap: "8px" } }, descargar, botonCaras,
         el("button", { class: "btn btn-danger btn-sm", type: "button", text: "Borrar", onclick: () => borrarLista(a) }))),
     el("div", { class: "stack", style: { marginTop: "14px" } }, conteo, zonaAvisos,
-      el("section", { class: "glass pad stack fade-in" }, marco,
-        el("p", { class: "muted xs", style: { margin: 0, textAlign: "center" }, text: "Verde: presente · Amarillo: por revisar · Toque una cara o el botón de foco de un estudiante" })),
+      el("section", { class: "glass pad stack fade-in" }, marco, zonaFicha,
+        el("p", { class: "muted xs", style: { margin: 0, textAlign: "center" }, text: "Verde: presente · Amarillo: por revisar · Toque una cara para ver quién es" })),
       zonaRevisar,
       el("section", { class: "glass pad stack fade-in" }, el("h2", { class: "brand h2", text: "Lista" }), zonaFilas))));
   pintar();

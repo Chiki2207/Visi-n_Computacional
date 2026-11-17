@@ -189,6 +189,18 @@ a { color: var(--accent); }
 .revisar-card figcaption { text-align: center; font-size: 0.75rem; color: var(--muted); margin-top: 4px; font-weight: 600; }
 .revisar-card .pie { grid-column: 1 / -1; }
 
+/* tarjeta al tocar una cara: su cara en la foto + su foto registrada */
+.ficha-cara { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 14px; border-radius: 18px; max-width: 460px; width: 100%; margin: 0 auto; }
+.ficha-cara figure { margin: 0; }
+.ficha-cara canvas, .ficha-cara img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 14px; background: #fff; display: block; }
+.ficha-cara figcaption { text-align: center; font-size: 0.75rem; color: var(--muted); margin-top: 4px; font-weight: 600; }
+.ficha-cara .pie { grid-column: 1 / -1; }
+.ficha-cara .estado-ficha { font-weight: 800; font-size: 0.95rem; }
+.ficha-presente { background: var(--ok-soft); }
+.ficha-presente .estado-ficha { color: var(--ok); }
+.ficha-revisar { background: var(--warn-soft); }
+.ficha-revisar .estado-ficha { color: var(--warn); }
+
 .filas { display: grid; gap: 8px; list-style: none; padding: 0; margin: 0; }
 .fila { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 18px; border: 1.5px solid var(--line); flex-wrap: wrap; }
 .fila .info { flex: 1; min-width: 140px; }
