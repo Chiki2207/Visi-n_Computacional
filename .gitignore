@@ -11,6 +11,8 @@ datos/*
 
 # Laboratorio y pruebas (varios GB)
 tmp/
+# Página de explicación (tiene nombres y caras de estudiantes; sus imágenes están en tmp/explicacion_modelos/img)
+como_funciona.html
 
 # Secretos de la web
 web/.env
