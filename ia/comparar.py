@@ -115,6 +115,9 @@ REALCE_PX = float(_os.environ.get("REALCE_PX", "32"))
 # Caras chicas: también en blanco y negro, contra la foto de registro en blanco y negro (quita el tinte de
 # la luz y las paredes del salón). Por modelo y por alumno, la nota más alta. Lo enciende config r19 (medido ahí).
 REALCE_GRIS = _os.environ.get("REALCE_GRIS", "0") == "1"
+# Cruce: la huella con contraste local (la de REALCE_CLAHE) también contra el registro en blanco y negro (la de
+# REALCE_GRIS). No saca ninguna huella nueva: solo una comparación más. Lo enciende config r19 (medido ahí).
+REALCE_CRUCE = _os.environ.get("REALCE_CRUCE", "0") == "1"
 
 
 def _gris(imagen: np.ndarray) -> np.ndarray:
@@ -577,6 +580,10 @@ def comparar_foto_grupal(
             if i_cara in grises:             # gris contra gris: también la nota más alta
                 sg = grises[i_cara]
                 sc = [{p: (max(sc[k][p], float(gris_gal[p][k] @ sg[k])) if p in gris_gal else sc[k][p]) for p in sc[k]}
+                      for k in range(3)]
+            if REALCE_CRUCE and i_cara in realzadas and gris_gal:   # contraste local contra el registro en gris
+                sr = _partes(realzadas[i_cara], 3)
+                sc = [{p: (max(sc[k][p], float(gris_gal[p][k] @ sr[k])) if p in gris_gal else sc[k][p]) for p in sc[k]}
                       for k in range(3)]
             fus, crudo = _fusion_partes(sc, w, float(fila_cara[14]))
             scores[i_cara] = fus
