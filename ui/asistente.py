@@ -7,6 +7,8 @@ Para explicarlo, son cuatro pasos y nada más:
 2. interpretar: de la frase saca la acción (pasar, presente, ausente, agregar, quitar) y los nombres.
 3. resolver_nombres: busca en la lista. Si hay dos con el mismo nombre, no elige; pide apellido o id.
 4. La ventana ejecuta esa acción con los mismos botones de siempre y responde «Listo».
+
+La página web usa los mismos cuatro pasos en web/frontend/asistente.js.
 """
 
 from __future__ import annotations

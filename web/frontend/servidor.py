@@ -443,7 +443,9 @@ async def _error(_r: Request, ex: Exception):
 
 
 _ESTATICOS = {"/": ("index.html", "text/html; charset=utf-8"), "/index.html": ("index.html", "text/html; charset=utf-8"),
-              "/app.js": ("app.js", "text/javascript; charset=utf-8"), "/estilo.css": ("estilo.css", "text/css; charset=utf-8")}
+              "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+              "/asistente.js": ("asistente.js", "text/javascript; charset=utf-8"),
+              "/estilo.css": ("estilo.css", "text/css; charset=utf-8")}
 
 
 @app.get("/config.js")
@@ -461,7 +463,7 @@ def _indice() -> Response:
     """La página con la versión de app.js y estilo.css en la dirección (?v=…): si se cambian, el navegador
     (también el del celular) toma la nueva al abrir la página, sin quedarse con la vieja guardada."""
     html = (CARPETA / "index.html").read_text(encoding="utf-8")
-    for archivo in ("app.js", "estilo.css"):
+    for archivo in ("asistente.js", "app.js", "estilo.css"):
         v = (CARPETA / archivo).stat().st_mtime_ns
         html = html.replace(f'"/{archivo}"', f'"/{archivo}?v={v}"')
     return Response(html, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
@@ -482,12 +484,28 @@ def _js():
     return _estatico("/app.js")
 
 
+@app.get("/asistente.js", include_in_schema=False)
+def _asistente_js():
+    return _estatico("/asistente.js")
+
+
 @app.get("/estilo.css", include_in_schema=False)
 def _css():
     return _estatico("/estilo.css")
 
 
 _MARCA = {"logouniamazonia.webp": "image/webp", "logouniamazonia-sm.webp": "image/webp", "plus-jakarta-sans.woff2": "font/woff2"}
+
+
+@app.get("/asistente/{archivo}", include_in_schema=False)
+def _asistente_sprite(archivo: str):
+    """Sprites del asistente en la página. No son parte del reconocimiento de lista."""
+    if not re.fullmatch(r"(reposo|boca_[aeioum]|ojos_(centro|izq|der|arriba|abajo|blink))\.jpg", archivo):
+        raise HTTPException(404)
+    ruta = (CARPETA / "asistente" / archivo).resolve()
+    if ruta.parent != (CARPETA / "asistente").resolve() or not ruta.is_file():
+        raise HTTPException(404)
+    return FileResponse(ruta, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/marca/{archivo}", include_in_schema=False)

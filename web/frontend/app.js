@@ -71,7 +71,10 @@ function fechaCorta(iso) {
 }
 function nota(x) { return x === null || x === undefined ? "" : Number(x).toFixed(2); }
 function irA(h) { if (location.hash === h) enrutar(); else location.hash = h; }
-function poner(...n) { raiz.replaceChildren(...n); window.scrollTo(0, 0); }
+function poner(...n) {
+  raiz.replaceChildren(...n);
+  window.scrollTo(0, 0);
+}
 function cargando(texto = "Cargando…") {
   return el("main", { class: "page-shell" }, el("div", { class: "glass pad row fade-in", style: { marginTop: "40px" } }, el("div", { class: "rueda" }), el("span", { class: "muted", text: texto })));
 }
@@ -152,6 +155,54 @@ function salirLocal() {
   guardar("asis_token", ""); guardar("asis_usuario", "");
   for (const u of est.fotos.values()) URL.revokeObjectURL(u);
   est.fotos.clear();
+  if (window.Asistente) Asistente.quitar();
+}
+
+function chatGeneral() {
+  if (!window.Asistente || !est.token) return;
+  Asistente.montar({
+    personas: async () => [],
+    actuar: async (pedido) => {
+      if (pedido.accion === "pasar") return "Abra una clase y use «Pasar lista» con la foto del salón. El reconocimiento lo hace el sistema de siempre.";
+      if (pedido.accion === "presente" || pedido.accion === "ausente") return "Eso se hace dentro de una lista ya hecha. Ábrala en Historial.";
+      if (pedido.accion === "agregar" || pedido.accion === "quitar") return "Para agregar o quitar estudiantes entre a una clase, pestaña Estudiantes.";
+      return "Abra una clase o una lista para que yo pueda ayudarle ahí.";
+    },
+  });
+}
+
+function chatDeClase(c, contenido, pestana) {
+  if (!window.Asistente || !est.token) return;
+  Asistente.montar();
+  Asistente.contexto({
+    personas: () => api(`/api/clases/${enc(c.id)}/estudiantes`).then((al) => al.map((x) => ({ id: x.codigo, nombre: x.nombre }))),
+    actuar: (pedido) => actuarEnClase(c, contenido, pestana, pedido),
+  });
+}
+
+async function actuarEnClase(c, contenido, pestana, pedido) {
+  if (pedido.accion === "pasar") {
+    if (pestana !== "lista") irA(`#/clase/${enc(c.id)}/lista`);
+    return "Para pasar lista tome la foto del salón en «Pasar lista». El reconocimiento lo hace el sistema de siempre.";
+  }
+  if (pedido.accion === "presente" || pedido.accion === "ausente") {
+    return "Eso se hace cuando ya hay una lista. Ábrala en Historial, o pase lista con la foto del salón.";
+  }
+  if (pedido.accion === "agregar") {
+    const nombre = String(pedido.nombre || "").split(" ").filter(Boolean).map((p) => p[0].toUpperCase() + p.slice(1)).join(" ");
+    return "Para agregar a " + nombre + ", use la pestaña Estudiantes y el botón de agregar con su foto. Así queda igual que siempre.";
+  }
+  if (pedido.accion === "quitar") {
+    if (!pedido.elegidos || !pedido.elegidos.length) return "Dime a quién quitar de la clase.";
+    const quitados = [];
+    for (const p of pedido.elegidos) {
+      await api(`/api/clases/${enc(c.id)}/estudiantes/${enc(p.id)}`, { metodo: "DELETE" });
+      quitados.push(`${p.nombre} (${p.id})`);
+    }
+    if (pestana === "estudiantes") await pestanaEstudiantes(c, contenido);
+    return `Listo. Quité a ${quitados.join(" y ")} de la clase. La foto queda guardada aparte.`;
+  }
+  return "No pude hacerlo.";
 }
 
 /* ------------------------------------------------------------------ rutas */
@@ -181,6 +232,7 @@ enrutar();
 
 /* ------------------------------------------------------------------ login (igual al de Vision_Computaciona_completo) */
 function vistaEntrar() {
+  if (window.Asistente) Asistente.quitar();
   const usuario = el("input", { type: "text", placeholder: "Ingresa tu usuario", autocomplete: "username", required: true });
   const clave = el("input", { type: "password", placeholder: "••••••••", autocomplete: "current-password", required: true });
   const ver = el("button", { type: "button", class: "ua-login-toggle", "aria-label": "Ver contraseña" }, icono("ojo", 22));
@@ -243,6 +295,7 @@ function cabecera() {
 /* ------------------------------------------------------------------ mis clases */
 async function vistaClases() {
   poner(cargando("Cargando tus clases…"));
+  chatGeneral();
   const clases = await api("/api/clases");
   const nombre = el("input", { class: "field grow", placeholder: "Nombre de la clase (ej. Computación 2 · Grupo A)", maxlength: 120, required: true, "aria-label": "Nombre de la clase" });
   const crear = el("button", { class: "btn btn-primary", type: "submit", text: "Crear clase" });
@@ -373,6 +426,7 @@ async function vistaClase(id, pestana) {
   if (pestana === "lista") pestanaPasar(c, contenido);
   else if (pestana === "estudiantes") await pestanaEstudiantes(c, contenido);
   else await pestanaHistorial(c, contenido);
+  chatDeClase(c, contenido, pestana);
 }
 
 function pestanaPasar(c, cont) {
@@ -525,6 +579,7 @@ function primeraMayus(t) { return t ? t[0].toUpperCase() + t.slice(1) : t; }
 /* ------------------------------------------------------------------ una lista */
 async function vistaLista(id) {
   poner(cargando("Cargando lista…"));
+  chatGeneral();
   const a = await api(`/api/asistencias/${enc(id)}`);
   const volver = el("a", { class: "back", href: `#/clase/${enc(a.clase_id)}/lista`, text: `← ${a.clase}` });
   if (a.estado === "procesando") return esperar(a, volver);
@@ -534,6 +589,7 @@ async function vistaLista(id) {
         el("div", { class: "row" },
           el("a", { class: "btn btn-primary", href: `#/clase/${enc(a.clase_id)}/lista`, text: "Intentar con otra foto" }),
           el("button", { class: "btn btn-danger", type: "button", text: "Descartar", onclick: () => borrarLista(a) }))))));
+    chatGeneral();
     return;
   }
   mostrarLista(a, volver);
@@ -730,4 +786,33 @@ function mostrarLista(a, volver) {
   pintar();
   img.addEventListener("load", pintarCajas, { once: true });
   foto(`/api/asistencias/${enc(a.id)}/foto`).then((u) => { img.src = u; }).catch((e) => marco.replaceWith(errorMsg(e)));
+  chatDeLista(a, regs, pintar);
+}
+
+function chatDeLista(a, regs, pintar) {
+  if (!window.Asistente || !est.token) return;
+  Asistente.montar();
+  Asistente.contexto({
+    personas: () => regs.map((r) => ({ id: r.codigo, nombre: r.nombre })),
+    actuar: async (pedido) => {
+      if (pedido.accion === "pasar") return "Esta lista ya fue realizada. Puede decir: pon a Ana como presente.";
+      if (pedido.accion === "agregar" || pedido.accion === "quitar") {
+        return "Para agregar o quitar un estudiante vuelva a la clase, pestaña Estudiantes. Aquí solo cambio presentes y ausentes.";
+      }
+      if (pedido.accion !== "presente" && pedido.accion !== "ausente") return "No pude hacerlo.";
+      const tocados = [];
+      for (const p of pedido.elegidos) {
+        const r = regs.find((x) => x.codigo === p.id);
+        if (!r) return `No encontré a ${p.nombre} en esta lista.`;
+        const nuevo = await api(`/api/asistencias/${enc(a.id)}/registros/${enc(r.codigo)}`, { metodo: "PATCH", json: { estado: pedido.accion } });
+        Object.assign(r, nuevo);
+        tocados.push(`${r.nombre} (${r.codigo})`);
+      }
+      pintar();
+      const verbo = pedido.accion === "presente" ? "presente" : "ausente";
+      return tocados.length > 1
+        ? `Listo. ${tocados.join(" y ")} quedaron ${verbo}s.`
+        : `Listo. ${tocados[0]} quedó ${verbo}.`;
+    },
+  });
 }
