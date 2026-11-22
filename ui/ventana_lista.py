@@ -5,6 +5,7 @@ dónde está cada presente / cada rostro detectado (como en la web).
 
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import tkinter as tk
@@ -19,6 +20,14 @@ if str(ROOT) not in sys.path:
 
 from app.asistencia_core import ResultadoAsistencia, es_revisar, orden_estado, pasar_lista  # noqa: E402
 from ia.leer_imagen import abrir_rgb  # noqa: E402  (misma foto, ya derecha, que ve el motor)
+from ui.asistente import (  # noqa: E402
+    AYUDA,
+    CaraAsistente,
+    decir,
+    escuchar,
+    interpretar,
+    resolver_nombres,
+)
 
 
 class VentanaLista(tk.Tk):
@@ -37,6 +46,9 @@ class VentanaLista(tk.Tk):
         self._focus_label = ""
         self._det_index = 0
         self._busy = False
+        self._oyendo = False
+        self._asistente_espera = False
+        self._aclaracion: dict | None = None
         self._foto_alumno_tk: ImageTk.PhotoImage | None = None
         self._rutas_foto: dict[str, Path] = {}
 
@@ -98,6 +110,7 @@ class VentanaLista(tk.Tk):
         # --- Lista ---
         right = ttk.Frame(mid, padding=4)
         mid.add(right, weight=2)
+        self._panel_asistente(right)
         ttk.Label(right, text="Lista de asistencia", font=("", 11, "bold")).pack(
             anchor=tk.W
         )
@@ -141,10 +154,288 @@ class VentanaLista(tk.Tk):
             right,
             text="Presentes arriba · ausentes abajo.\n"
             "👁 Ver foto = selfie grande. "
-            "Poner presente/ausente = manual (como en la web).",
+            "Poner presente/ausente = manual.\n"
+            "Al asistente: «pon a Ana como presente».",
             foreground="#555",
             wraplength=300,
         ).pack(anchor=tk.W, pady=4)
+
+    def _panel_asistente(self, parent: ttk.Frame) -> None:
+        caja = ttk.LabelFrame(parent, text="Asistente", padding=4)
+        caja.pack(fill=tk.X, pady=(0, 6))
+        fila = ttk.Frame(caja)
+        fila.pack(fill=tk.X)
+        self.cara = CaraAsistente(fila)
+        self.cara.pack(side=tk.LEFT, padx=(0, 6))
+        self.lbl_asistente = ttk.Label(
+            fila,
+            text="Escríbeme o pulsa el micrófono. " + AYUDA,
+            wraplength=230,
+            justify=tk.LEFT,
+        )
+        self.lbl_asistente.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        pedido = ttk.Frame(caja)
+        pedido.pack(fill=tk.X, pady=(4, 0))
+        self.ent_asistente = ttk.Entry(pedido)
+        self.ent_asistente.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.ent_asistente.bind("<Return>", lambda _e: self._enviar_asistente())
+        ttk.Button(pedido, text="Enviar", command=self._enviar_asistente).pack(side=tk.LEFT, padx=3)
+        self.btn_oir = ttk.Button(pedido, text="Mic", command=self._oir_asistente)
+        self.btn_oir.pack(side=tk.LEFT)
+
+    def _decir_asistente(self, texto: str, hablar: bool = False) -> None:
+        self.lbl_asistente.config(text=texto)
+        if not hablar:
+            return
+        self.cara.poner("habla")
+        proc = decir(texto)
+
+        def vigilar() -> None:
+            if not self.winfo_exists():
+                return
+            if proc is None or proc.poll() is not None:
+                if self.cara.modo == "habla":
+                    self.cara.poner("idle")
+                return
+            self.after(200, vigilar)
+
+        self.after(200, vigilar)
+
+    def _enviar_asistente(self, texto: str | None = None) -> None:
+        if texto is None:
+            texto = self.ent_asistente.get().strip()
+            self.ent_asistente.delete(0, tk.END)
+        else:
+            texto = texto.strip()
+            self.ent_asistente.delete(0, tk.END)
+            self.ent_asistente.insert(0, texto)
+        if not texto:
+            return
+        self._decir_asistente(self._ejecutar_orden(texto), hablar=True)
+
+    def _oir_asistente(self) -> None:
+        if self._oyendo:
+            return
+        self._oyendo = True
+        self.btn_oir.config(state=tk.DISABLED)
+        self.cara.poner("oye")
+        self.lbl_asistente.config(text="Te escucho…")
+
+        def trabajo() -> None:
+            dicho, err = escuchar()
+            self.after(0, lambda: self._recibir_voz(dicho, err))
+
+        threading.Thread(target=trabajo, daemon=True).start()
+
+    def _recibir_voz(self, texto: str, err: str | None) -> None:
+        self._oyendo = False
+        self.btn_oir.config(state=tk.NORMAL)
+        self.cara.poner("idle")
+        if err == "sin_oido":
+            self._decir_asistente(
+                "Este Windows no tiene reconocedor de voz. Escríbeme el pedido en la casilla.",
+                hablar=True,
+            )
+            return
+        if err:
+            self._decir_asistente(err, hablar=True)
+            return
+        if not texto:
+            self._decir_asistente("No oí nada. Intenta otra vez o escríbelo.", hablar=True)
+            return
+        self._enviar_asistente(texto)
+
+    def _ejecutar_orden(self, texto: str) -> str:
+        orden = interpretar(texto)
+        if self._aclaracion and orden.accion in {"no", "falta_nombre"}:
+            return self._responder_aclaracion(texto)
+        self._aclaracion = None
+        if orden.accion == "ayuda":
+            return AYUDA
+        if orden.accion == "falta_nombre":
+            return "Dime el nombre. Por ejemplo: pon a Ana como presente."
+        if orden.accion == "pasar":
+            return self._asistente_pasar()
+        if orden.accion == "presente":
+            return self._asistente_estado(orden.nombres, "presente")
+        if orden.accion == "ausente":
+            return self._asistente_estado(orden.nombres, "ausente")
+        if orden.accion == "agregar":
+            return self._asistente_agregar(orden.nombres)
+        if orden.accion == "quitar":
+            return self._asistente_quitar(orden.nombres)
+        return "No entendí. " + AYUDA
+
+    def _responder_aclaracion(self, texto: str) -> str:
+        from ui.asistente import normalizar
+
+        pendiente = self._aclaracion or {}
+        t = normalizar(texto)
+        pide_par = bool(re.match(r"^(los dos|las dos|ambos|ambas)\b", t))
+        pide_todos = bool(re.match(r"^(todos|todas)\b", t))
+        if pide_par or pide_todos:
+            grupo = list(pendiente.get("opciones") or [])
+            if pide_par and len(grupo) != 2:
+                return f"Hay {len(grupo)}, no dos. Dime el id."
+            elegidos, err, opciones = grupo, None, []
+        else:
+            elegidos, err, opciones = resolver_nombres([texto], pendiente.get("opciones") or [])
+        if opciones:
+            self._aclaracion = {**pendiente, "opciones": opciones}
+            return err or "Sigo sin saber cuál."
+        if err:
+            return err
+        if not elegidos:
+            return "No quedó nadie para cambiar."
+        self._aclaracion = None
+        if pendiente.get("accion") == "quitar":
+            return self._quitar_elegidos(elegidos)
+        return self._aplicar_elegidos(elegidos, pendiente.get("estado") or "presente")
+
+    def _asistente_pasar(self) -> str:
+        if self._busy:
+            return "Sigo pasando la lista."
+        if not self.excel_path or not self.foto_path:
+            return "Primero elige el Excel de la clase y la foto grupal."
+        self._aclaracion = None
+        self._asistente_espera = True
+        self._pasar_lista()
+        return "Estoy pasando la lista."
+
+    def _personas_lista(self) -> list[dict]:
+        if not self.resultado:
+            return []
+        return [{"id": f["id"], "nombre": f["nombre"]} for f in self.resultado.filas]
+
+    def _asistente_estado(self, nombres: list[str], estado: str) -> str:
+        if not self.resultado:
+            return "Primero pasa la lista. Di: pasa la lista."
+        elegidos, err, opciones = resolver_nombres(nombres, self._personas_lista())
+        if opciones:
+            self._aclaracion = {"accion": "estado", "estado": estado, "opciones": opciones}
+            return err or "Dime cuál."
+        if err:
+            return err
+        return self._aplicar_elegidos(elegidos, estado)
+
+    def _aplicar_elegidos(self, elegidos: list[dict], estado: str) -> str:
+        if not self.resultado:
+            return "Primero pasa la lista. Di: pasa la lista."
+        por_id = {str(f["id"]): f for f in self.resultado.filas}
+        if any(str(p["id"]) not in por_id for p in elegidos):
+            return "Ese estudiante no está en la lista que ya pasé."
+        for persona in elegidos:
+            self._fijar_estado_fila(por_id[str(persona["id"])], estado)
+        if estado == "ausente":
+            self._focus_bbox = None
+            self._focus_label = ""
+            self._redibujar_foto()
+        else:
+            ultima = por_id[str(elegidos[-1]["id"])]
+            if ultima.get("bbox"):
+                self._marcar_en_grupal(ultima)
+        self._llenar_lista(seleccionar=str(elegidos[-1]["id"]))
+        self._mostrar_preview_alumno(por_id[str(elegidos[-1]["id"])])
+        self._guardar_lista_actual()
+        self.lbl_estado.config(text=self._conteo() + self._aviso_selfies() + self._aviso_foto())
+        quienes = " y ".join(f"{p['nombre']} ({p['id']})" for p in elegidos)
+        verbo = "presente" if estado == "presente" else "ausente"
+        if len(elegidos) > 1:
+            verbo += "s"
+            return f"Listo. {quienes} quedaron {verbo}."
+        return f"Listo. {quienes} quedó {verbo}."
+
+    def _asistente_agregar(self, nombres: list[str]) -> str:
+        if not self.excel_path:
+            return "Primero elige el Excel de la clase."
+        if len(nombres) != 1:
+            return "Agrega a uno por uno, porque cada estudiante lleva su foto."
+        nombre = " ".join(p.capitalize() for p in nombres[0].split())
+        ruta = filedialog.askopenfilename(
+            title=f"Selfie de {nombre}",
+            filetypes=[
+                ("Imágenes", "*.webp *.jpg *.jpeg *.png *.heic *.heif"),
+                ("Todos", "*.*"),
+            ],
+        )
+        if not ruta:
+            return "No lo agregué: falta la foto."
+        from app.excel_clase import agregar_estudiante, cargar_estudiantes
+
+        try:
+            est = agregar_estudiante(self.excel_path, nombre, Path(ruta))
+        except Exception as ex:
+            return str(ex)
+        if self.resultado:
+            self.resultado.filas.append(
+                {
+                    "id": est.id,
+                    "nombre": est.nombre,
+                    "estado": "ausente",
+                    "similitud": None,
+                    "motivo": "recien_agregado",
+                    "bbox": None,
+                    "foto": str(est.ruta_imagen),
+                    "origen": "manual",
+                }
+            )
+            self._llenar_lista(seleccionar=est.id)
+            self._guardar_lista_actual()
+            self.lbl_estado.config(text=self._conteo() + self._aviso_selfies() + self._aviso_foto())
+        from ui.asistente import normalizar
+
+        iguales = [
+            e for e in cargar_estudiantes(self.excel_path)
+            if normalizar(e.nombre) == normalizar(est.nombre) and e.id != est.id
+        ]
+        aviso = ""
+        if iguales:
+            aviso = " Ya hay otro con ese nombre: " + ", ".join(f"{e.nombre} ({e.id})" for e in iguales) + ". Para no confundirlos, dime el id."
+        return f"Listo. Agregué a {est.nombre} con el id {est.id}.{aviso}"
+
+    def _asistente_quitar(self, nombres: list[str]) -> str:
+        if not self.excel_path:
+            return "Primero elige el Excel de la clase."
+        if len(nombres) != 1:
+            return "Quita a un estudiante por vez."
+        from app.excel_clase import cargar_estudiantes
+
+        try:
+            personas = [{"id": e.id, "nombre": e.nombre} for e in cargar_estudiantes(self.excel_path)]
+        except Exception as ex:
+            return str(ex)
+        elegidos, err, opciones = resolver_nombres(nombres, personas)
+        if opciones:
+            self._aclaracion = {"accion": "quitar", "opciones": opciones}
+            return err or "Dime cuál."
+        if err:
+            return err
+        return self._quitar_elegidos(elegidos)
+
+    def _quitar_elegidos(self, elegidos: list[dict]) -> str:
+        from app.excel_clase import quitar_estudiante
+
+        if not self.excel_path:
+            return "Primero elige el Excel de la clase."
+        quitados = []
+        for persona in elegidos:
+            try:
+                quien = quitar_estudiante(self.excel_path, str(persona["id"]))
+            except Exception as ex:
+                return str(ex)
+            quitados.append(f"{quien} ({persona['id']})")
+            if self.resultado:
+                self.resultado.filas = [
+                    f for f in self.resultado.filas if str(f.get("id")) != str(persona["id"])
+                ]
+        if self.resultado:
+            self._focus_bbox = None
+            self._focus_label = ""
+            self._redibujar_foto()
+            self._llenar_lista()
+            self._guardar_lista_actual()
+            self.lbl_estado.config(text=self._conteo() + self._aviso_selfies() + self._aviso_foto())
+        return "Listo. Quité a " + " y ".join(quitados) + " de la clase. La foto sigue en la carpeta."
 
     def _elegir_excel(self) -> None:
         ini = ROOT / "datos" / "clases"
@@ -224,6 +515,9 @@ class VentanaLista(tk.Tk):
         self._busy = False
         self.btn_pasar.config(state=tk.NORMAL)
         self.lbl_estado.config(text="Error al pasar lista")
+        if self._asistente_espera:
+            self._asistente_espera = False
+            self._decir_asistente("No pude pasar la lista. " + str(ex), hablar=True)
         messagebox.showerror("Error", str(ex))
 
     def _aplicar_resultado(self, res: ResultadoAsistencia) -> None:
@@ -243,6 +537,12 @@ class VentanaLista(tk.Tk):
         )
         if res.detecciones:
             self._mostrar_deteccion(0)
+        if self._asistente_espera:
+            self._asistente_espera = False
+            self._decir_asistente(
+                "Listo. La lista ya fue realizada. " + self._conteo(),
+                hablar=True,
+            )
 
     def _llenar_lista(self, seleccionar: str | None = None) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -301,6 +601,12 @@ class VentanaLista(tk.Tk):
         else:
             self.btn_manual.config(text="Poner presente")
 
+    def _fijar_estado_fila(self, fila: dict, estado: str) -> None:
+        """La misma corrección manual de siempre: presente o ausente, sin tocar la IA."""
+        fila["estado"] = estado
+        fila["origen"] = "manual"
+        fila["motivo"] = "manual_presente" if estado == "presente" else "manual_ausente"
+
     def _toggle_manual(self) -> None:
         """Como en la web: el docente corrige a mano presente ↔ ausente."""
         if not self.resultado:
@@ -311,17 +617,13 @@ class VentanaLista(tk.Tk):
             return
         sid = str(fila["id"])
         if fila.get("estado") == "presente":
-            fila["estado"] = "ausente"
-            fila["origen"] = "manual"
-            fila["motivo"] = "manual_ausente"
+            self._fijar_estado_fila(fila, "ausente")
             # no borramos bbox por si vuelve a marcarse; la marca en foto se quita
             self._focus_bbox = None
             self._focus_label = ""
             self._redibujar_foto()
         else:
-            fila["estado"] = "presente"
-            fila["origen"] = "manual"
-            fila["motivo"] = "manual_presente"
+            self._fijar_estado_fila(fila, "presente")
             if fila.get("bbox"):
                 self._marcar_en_grupal(fila)
         self._llenar_lista(seleccionar=sid)

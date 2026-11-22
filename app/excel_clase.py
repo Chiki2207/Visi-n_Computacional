@@ -11,6 +11,8 @@ ruta_imagen puede ser:
 
 from __future__ import annotations
 
+import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -197,3 +199,78 @@ def crear_plantilla_clase(carpeta: Path, nombre_clase: str = "Clase_Ejemplo") ->
         encoding="utf-8",
     )
     return excel
+
+
+def _siguiente_id(ids: list[str]) -> str:
+    nums = []
+    for eid in ids:
+        m = re.fullmatch(r"E(\d+)", eid.strip(), re.IGNORECASE)
+        if m:
+            nums.append(int(m.group(1)))
+    return f"E{max(nums, default=0) + 1:03d}"
+
+
+def _hoja_estudiantes(wb):
+    return wb["estudiantes"] if "estudiantes" in wb.sheetnames else wb.active
+
+
+def agregar_estudiante(excel: Path, nombre: str, foto: Path) -> Estudiante:
+    """Añade una fila al Excel de la clase y copia la selfie a fotos/. No toca la IA."""
+    excel = excel.resolve()
+    nombre = nombre.strip()
+    foto = foto.resolve()
+    if not nombre:
+        raise ValueError("Falta el nombre")
+    if not foto.is_file():
+        raise FileNotFoundError(f"No existe la foto: {foto}")
+    actuales = cargar_estudiantes(excel)
+    # Dos personas pueden llamarse igual. El id nuevo las distingue.
+    eid = _siguiente_id([e.id for e in actuales])
+    fotos = excel.parent / "fotos"
+    fotos.mkdir(parents=True, exist_ok=True)
+    destino = fotos / f"{eid}{foto.suffix.lower()}"
+    shutil.copy2(foto, destino)
+    wb = load_workbook(excel)
+    _hoja_estudiantes(wb).append([eid, nombre, f"fotos/{destino.name}"])
+    wb.save(excel)
+    wb.close()
+    return Estudiante(id=eid, nombre=nombre, ruta_imagen=destino.resolve())
+
+
+def quitar_estudiante(excel: Path, eid: str) -> str:
+    """Quita la fila del Excel. La selfie se queda en fotos/. No toca la IA."""
+    excel = excel.resolve()
+    wb = load_workbook(excel)
+    ws = _hoja_estudiantes(wb)
+    filas = list(ws.iter_rows(values_only=True))
+    if not filas:
+        wb.close()
+        raise ValueError("El Excel está vacío")
+    encabezado = [_celda(c).lower() for c in filas[0]]
+    if "id" not in encabezado:
+        wb.close()
+        raise ValueError("El Excel no tiene columna id")
+    i_id = encabezado.index("id")
+    i_nom = encabezado.index("nombre") if "nombre" in encabezado else None
+    borrada = None
+    fila_xl = None
+    for n, row in enumerate(filas[1:], start=2):
+        if row and _celda(row[i_id] if i_id < len(row) else "") == eid:
+            borrada = _celda(row[i_nom]) if i_nom is not None and i_nom < len(row) else eid
+            fila_xl = n
+            break
+    if fila_xl is None:
+        wb.close()
+        raise ValueError(f"No está en la clase: {eid}")
+    quedan = sum(
+        1
+        for row in filas[1:]
+        if row and _celda(row[i_id] if i_id < len(row) else "") and _celda(row[i_id] if i_id < len(row) else "") != eid
+    )
+    if quedan < 1:
+        wb.close()
+        raise ValueError("No puedo quitar al último estudiante de la clase")
+    ws.delete_rows(fila_xl)
+    wb.save(excel)
+    wb.close()
+    return borrada or eid
