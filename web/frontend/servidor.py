@@ -7,6 +7,8 @@ archivos que la ventana de escritorio. Sin base de datos:
   datos/clases/<clase>/fotos_grupales/    fotos de la clase que se suben para pasar lista
   datos/listas/lista_<clase>_<fecha>.xlsx listas (hojas lista / meta / detecciones, como la ventana)
                                           + hoja "cajas" (dónde está cada cara, para dibujarla en la web)
+  datos/codigos_listas.json               código de 4 números de cada clase y lista (para entrar desde el chat).
+                                          Archivo aparte: no cambia ningún Excel ni nada del reconocimiento.
 
 Lo que se agrega en la web lo ve la ventana y al revés. El reconocimiento lo hace el servicio de IA
 (web/ia_servicio, puerto 8001, solo interno). Docentes: web/usuarios.json (claves cifradas).
@@ -79,6 +81,7 @@ DATOS = (_datos if _datos.is_absolute() else RAIZ / _datos).resolve()
 CLASES = DATOS / "clases"
 LISTAS = DATOS / "listas"
 USUARIOS = Path(os.environ.get("USUARIOS", "").strip() or WEB / "usuarios.json")
+CODIGOS = Path(os.environ.get("CODIGOS", "").strip() or DATOS / "codigos_listas.json")
 MAX_MB = float(os.environ.get("MAX_MB", "25"))
 SESION_HORAS = float(os.environ.get("SESION_HORAS", "12"))
 EXTENSIONES = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".bmp", ".tif", ".tiff"}
@@ -500,7 +503,7 @@ _MARCA = {"logouniamazonia.webp": "image/webp", "logouniamazonia-sm.webp": "imag
 @app.get("/asistente/{archivo}", include_in_schema=False)
 def _asistente_sprite(archivo: str):
     """Sprites del asistente en la página. No son parte del reconocimiento de lista."""
-    if not re.fullmatch(r"(reposo|boca_[aeioum]|ojos_(centro|izq|der|arriba|abajo|blink))\.jpg", archivo):
+    if not re.fullmatch(r"(reposo|boca_[aeioum]|ojos_(centro|izq|der|arriba|abajo|blink|arriba_izq|arriba_der|abajo_izq|abajo_der))\.jpg", archivo):
         raise HTTPException(404)
     ruta = (CARPETA / "asistente" / archivo).resolve()
     if ruta.parent != (CARPETA / "asistente").resolve() or not ruta.is_file():
@@ -554,9 +557,82 @@ def salir(authorization: str = Header(default="")) -> dict:
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------- códigos de 4 números
+# Cada clase y cada lista tiene un código fijo de 4 números (1000-9999) para entrar desde el chat
+# («entra a la lista 4821»). Se guardan en un archivo aparte (CODIGOS) como {"clase:<carpeta>": "4821",
+# "lista:<archivo>.xlsx": "5930"}. El primer intento sale del nombre (siempre el mismo); si ya está usado,
+# se toma el siguiente libre. Una vez dado, no cambia ni se reutiliza (aunque la lista se borre).
+_codigos_lock = threading.Lock()
+_codigos: dict[str, str] | None = None
+
+
+def _codigos_cargar() -> dict[str, str]:
+    global _codigos
+    if _codigos is None:
+        try:
+            datos = json.loads(CODIGOS.read_text(encoding="utf-8")) if CODIGOS.is_file() else {}
+            _codigos = {str(k): str(v) for k, v in datos.items() if re.fullmatch(r"\d{4}", str(v))}
+        except Exception as ex:  # noqa: BLE001  (archivo dañado: se guarda aparte y se rehace igual, por el nombre)
+            log.warning("No se pudo leer %s (%s): se rehace", CODIGOS, ex)
+            try:
+                CODIGOS.replace(CODIGOS.with_name(f"{CODIGOS.name}.danado_{datetime.now():%Y%m%d_%H%M%S}"))
+            except OSError:
+                pass
+            _codigos = {}
+    return _codigos
+
+
+def _codigos_guardar(m: dict[str, str]) -> None:
+    try:
+        CODIGOS.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CODIGOS.with_name(CODIGOS.name + ".tmp")
+        tmp.write_text(json.dumps(m, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, CODIGOS)
+    except OSError as ex:
+        log.warning("No se pudo guardar %s: %s (los códigos siguen en memoria)", CODIGOS, ex)
+
+
+def _codigos_de(claves: list[str]) -> dict[str, str]:
+    """Código de cada clave ("clase:<carpeta>" o "lista:<archivo>"); da los que falten y guarda una vez."""
+    with _codigos_lock:
+        m = _codigos_cargar()
+        usados = set(m.values())
+        nuevo = False
+        for k in claves:
+            if k in m:
+                continue
+            base = int(hashlib.sha1(k.encode("utf-8")).hexdigest(), 16) % 9000
+            for i in range(9000):
+                c = str(1000 + (base + i) % 9000)
+                if c not in usados:
+                    m[k] = c
+                    usados.add(c)
+                    nuevo = True
+                    break
+        if nuevo:
+            _codigos_guardar(m)
+        return {k: m.get(k, "") for k in claves}
+
+
+def _codigo(clave: str) -> str:
+    return _codigos_de([clave])[clave]
+
+
+def _todas_las_claves() -> list[str]:
+    claves = []
+    if CLASES.is_dir():
+        claves += [f"clase:{c.name}" for c in sorted(CLASES.iterdir(), key=lambda p: p.name.lower())
+                   if c.is_dir() and not c.name.startswith((".", "_")) and (c / "estudiantes.xlsx").is_file()]
+    if LISTAS.is_dir():
+        claves += [f"lista:{p.name}" for p in sorted(LISTAS.iterdir()) if RE_LISTA.match(p.name)]
+    claves += [f"lista:{a}" for a in list(_trabajos)]
+    return claves
+
+
 # ---------------------------------------------------------------------- clases
 def _clase_dict(c: Path) -> dict:
-    return {"id": c.name, "nombre": _nombre_visible(c), "estudiantes": len(_alumnos(c)), "listas": len(_listas_de(c.name))}
+    return {"id": c.name, "nombre": _nombre_visible(c), "estudiantes": len(_alumnos(c)), "listas": len(_listas_de(c.name)),
+            "codigo": _codigo(f"clase:{c.name}")}
 
 
 @app.get("/api/clases")
@@ -781,7 +857,7 @@ async def nueva_asistencia(clase: str, foto: UploadFile = File(...), u=Usr) -> d
     _trabajos[archivo] = {"estado": "procesando", "clase": c.name, "foto": destino, "creada": datetime.now().isoformat(),
                           "nombre_archivo": foto.filename or destino.name, "por": u["usuario"]}
     _cola.submit(_procesar, archivo)
-    return {"id": archivo, "estado": "procesando"}
+    return {"id": archivo, "estado": "procesando", "codigo": _codigo(f"lista:{archivo}")}
 
 
 def _procesar(archivo: str) -> None:
@@ -952,16 +1028,52 @@ def asistencias(clase: str, _u=Usr) -> list[dict]:
         except Exception:  # noqa: BLE001  (un Excel dañado no tumba el historial)
             out.append({"id": p.name, "clase_id": c.name, "estado": "error", "error": "No se pudo leer esta lista",
                         "creada": None, "nombre_archivo": p.name})
+    cods = _codigos_de([f"lista:{a['id']}" for a in out])
+    for a in out:
+        a["codigo"] = cods[f"lista:{a['id']}"]
     return sorted(out, key=lambda a: a["id"], reverse=True)
 
 
 @app.get("/api/asistencias/{archivo}")
 def asistencia(archivo: str, _u=Usr) -> dict:
     if archivo in _trabajos:
-        return _resumen_trabajo(archivo, _trabajos[archivo])
-    d = _leer_lista(archivo)
+        d = _resumen_trabajo(archivo, _trabajos[archivo])
+    else:
+        d = _leer_lista(archivo)
     d["clase"] = _nombre_visible(CLASES / d["clase_id"]) if (CLASES / d["clase_id"]).is_dir() else d["clase_id"]
+    d["codigo"] = _codigo(f"lista:{archivo}")
     return d
+
+
+@app.get("/api/codigos/{codigo}")
+def buscar_codigo(codigo: str, _u=Usr) -> dict:
+    """A qué clase o lista lleva un código de 4 números (para «entra a la lista 4821» en el chat)."""
+    if not re.fullmatch(r"\d{4}", codigo or ""):
+        raise HTTPException(404, "El código son 4 números")
+
+    def buscar() -> str | None:
+        with _codigos_lock:
+            return next((k for k, v in _codigos_cargar().items() if v == codigo), None)
+
+    clave = buscar()
+    if clave is None:                      # por si aún no se había mostrado: se dan todos y se busca otra vez
+        _codigos_de(_todas_las_claves())
+        clave = buscar()
+    if clave:
+        tipo, ident = clave.split(":", 1)
+        if tipo == "clase":
+            try:
+                c = _carpeta_clase(ident)
+                return {"tipo": "clase", "id": c.name, "clase_id": c.name, "nombre": _nombre_visible(c), "codigo": codigo}
+            except HTTPException:
+                pass
+        elif tipo == "lista" and (ident in _trabajos or (RE_LISTA.match(ident) and (LISTAS / ident).is_file())):
+            m = RE_LISTA.match(ident)
+            clase_id = _trabajos[ident]["clase"] if ident in _trabajos else m["clase"]
+            nombre = _nombre_visible(CLASES / clase_id) if (CLASES / clase_id).is_dir() else clase_id
+            return {"tipo": "lista", "id": ident, "clase_id": clase_id, "nombre": nombre, "codigo": codigo,
+                    "creada": datetime.strptime(m["fecha"], "%Y%m%d_%H%M%S").isoformat() if m else None}
+    raise HTTPException(404, f"No hay ninguna lista ni clase con el código {codigo}")
 
 
 @app.get("/api/asistencias/{archivo}/foto")

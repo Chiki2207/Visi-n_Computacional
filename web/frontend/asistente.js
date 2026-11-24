@@ -9,7 +9,7 @@
 (function (raiz) {
   "use strict";
 
-  const AYUDA = "Puedo pasar la lista, poner presente, quitar un presente, agregar un estudiante o quitarlo de la clase. Por ejemplo: pon a Ana como presente.";
+  const AYUDA = "Puedo pasar la lista, poner presente, quitar un presente, agregar un estudiante o quitarlo de la clase. Por ejemplo: pon a Ana como presente. También te llevo a una lista con su código de 4 números: entra a la lista 4821.";
 
   function normalizar(texto) {
     return String(texto || "").trim().toLowerCase()
@@ -27,6 +27,40 @@
       .replace(/\s+por favor$/, "")).filter((n) => n && !fuera.has(n));
   }
 
+  /* «entra a la lista 4821», «4821», «abre la clase Computación 2»: cambiar de lista desde el chat.
+     Solo navega por la página; no toca nada del reconocimiento. */
+  const VERBO_ENTRAR = /^(?:entra|entrar|entre|entremos|ingresa|ingresar|ingrese|abre|abrir|abra|abreme|ve|vamos|ir|llevame|lleva|muestrame|muestra|muestre|selecciona|seleccionar|seleccione|elige|elegir|escoge|escoger)\b\s*/;
+
+  function cuatroCifras(trozo) {
+    const solo = String(trozo || "").replace(/\s+/g, "");
+    return /^\d{4}$/.test(solo) ? solo : "";
+  }
+
+  function interpretarEntrar(t) {
+    const directo = cuatroCifras(t);
+    if (directo) return { accion: "entrar", codigo: directo, nombre: "", tipo: "" };
+    const conVerbo = VERBO_ENTRAR.test(t);
+    let r = t.replace(VERBO_ENTRAR, "")
+      .replace(/^(?:me\s+)?(?:a|al|en|para|hacia)\s+/, "")
+      .replace(/^(?:la|el|los|las)\s+/, "");
+    let tipo = "";
+    let conCodigo = false;
+    const mt = r.match(/^(listas?|clases?|curso|grupo|materia)\b\s*/);
+    if (mt) { tipo = mt[1].startsWith("lista") ? "lista" : "clase"; r = r.slice(mt[0].length); }
+    r = r.replace(/^(?:de la|del|de|con el|con)\s+/, "");
+    const mt2 = r.match(/^(?:clase|curso|grupo|materia)\b\s*/);
+    if (mt2) { tipo = tipo || "clase"; r = r.slice(mt2[0].length); }
+    const mc = r.match(/^(?:codigo|numero|num|no|#)\s*/);
+    if (mc) { conCodigo = true; r = r.slice(mc[0].length); }
+    r = r.replace(/\s+por favor$/, "").trim();
+    if (!conVerbo && !tipo && !conCodigo) return null;
+    if (!conVerbo && !conCodigo && !cuatroCifras(r) && !/\b\d{4}\b/.test(r)) return null;   // «lista de Ana» sin verbo no es entrar
+    if (!r) return { accion: "entrar", codigo: "", nombre: "", tipo };
+    const enMedio = r.match(/\b(\d{4})\b/);
+    const codigo = cuatroCifras(r) || (enMedio ? enMedio[1] : "");
+    return { accion: "entrar", codigo, nombre: r, tipo };
+  }
+
   function interpretar(texto) {
     let t = normalizar(texto)
       .replace(/^(oye |hola |buenas |por favor |quiero que |puedes |puede |me )+/, "")
@@ -37,6 +71,9 @@
       .replace(/\b(elimina|elimines|elimine|eliminar|borra|borrar|saca|sacar)\b/g, "quita")
       .replace(/\b(pases|pase|pasar|toma|tomar|haz|hacer)\b/g, "pasa");
     if (["ayuda", "que puedes hacer", "que sabes hacer", "que haces", "comandos"].includes(t)) return { accion: "ayuda", nombres: [] };
+    if (/^pasa( la| el)? (lista|asistencia)$/.test(t)) return { accion: "pasar", nombres: [] };
+    const entrar = interpretarEntrar(t);
+    if (entrar) return { ...entrar, nombres: [] };
     if (/^pasa( la| el)? (lista|asistencia)$/.test(t)) return { accion: "pasar", nombres: [] };
     const patrones = [
       ["quitar", /^(?:quita) (?:al |el |la |a )?(?:estudiante|alumno|alumna) (.+)$/],
@@ -154,32 +191,100 @@
     return dy < 0 ? "ojos_arriba" : "ojos_abajo";
   }
 
+  /* Voz a texto con el reconocimiento del navegador (igual que antes).
+     Devuelve { promesa, enviar, cancelar }:
+     - promesa: el texto oído ("" si no oyó nada, null si se canceló).
+     - enviar(): deja de oír y manda lo que ya oyó (botón enviar / soltar el micrófono).
+     - cancelar(): deja de oír y no manda nada (botón basura / deslizar a la izquierda).
+     Si nadie toca nada, termina solo cuando la persona deja de hablar, como siempre. */
   function escuchar() {
     const SR = raiz.SpeechRecognition || raiz.webkitSpeechRecognition;
-    if (!SR) return Promise.reject(new Error("sin_oido"));
-    return new Promise((resolve, reject) => {
-      const rec = new SR();
+    if (!SR) return { promesa: Promise.reject(new Error("sin_oido")), enviar() {}, cancelar() {} };
+    let rec = null;
+    let cancelado = false;
+    let final = "";
+    let parcial = "";
+    const promesa = new Promise((resolve, reject) => {
+      rec = new SR();
       rec.lang = "es-CO";
-      rec.interimResults = false;
+      rec.interimResults = true;     // así, si la persona toca enviar a mitad de frase, no se pierde lo dicho
       rec.maxAlternatives = 1;
-      rec.onresult = (ev) => resolve(ev.results[0][0].transcript || "");
-      rec.onerror = (ev) => reject(new Error(ev.error === "not-allowed" ? "Permita el micrófono en el navegador." : "No pude oír. Escríbalo."));
-      rec.onend = () => {};
+      rec.onresult = (ev) => {
+        parcial = "";
+        for (let i = ev.resultIndex; i < ev.results.length; i++) {
+          const r = ev.results[i];
+          if (r.isFinal) final += (final ? " " : "") + (r[0].transcript || "").trim();
+          else parcial += r[0].transcript || "";
+        }
+      };
+      rec.onerror = (ev) => {
+        if (cancelado || ev.error === "aborted") return;
+        if (ev.error === "no-speech") return;      // onend lo cierra con ""
+        reject(new Error(ev.error === "not-allowed" || ev.error === "service-not-allowed"
+          ? "Permita el micrófono en el navegador." : "No pude oír. Escríbalo."));
+      };
+      rec.onend = () => resolve(cancelado ? null : (final || parcial).trim());
       try { rec.start(); } catch (e) { reject(e); }
     });
+    return {
+      promesa,
+      enviar() { try { rec && rec.stop(); } catch { /* ya terminó */ } },
+      cancelar() { cancelado = true; try { rec && rec.abort(); } catch { /* ya terminó */ } },
+    };
+  }
+
+  /* Ícono SVG fijo (nunca datos del usuario). */
+  function iconoSvg(d, t = 22) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("width", t);
+    svg.setAttribute("height", t);
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("fill", "currentColor");
+    path.setAttribute("d", d);
+    svg.append(path);
+    return svg;
+  }
+  const ICONO_MIC = "M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z";
+  const ICONO_ENVIAR = "M2.01 21 23 12 2.01 3 2 10l15 2-15 2z";
+  const ICONO_BASURA = "M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z";
+
+  /* Las 9 miradas: frente + 8 direcciones (ángulo en grados, 0 = derecha, 90 = abajo, como la pantalla). */
+  const MIRADAS = [
+    ["ojos_der", 0], ["ojos_abajo_der", 45], ["ojos_abajo", 90], ["ojos_abajo_izq", 135],
+    ["ojos_izq", 180], ["ojos_arriba_izq", -135], ["ojos_arriba", -90], ["ojos_arriba_der", -45],
+  ];
+  function difAngulo(a, b) {
+    let d = Math.abs(a - b) % 360;
+    return d > 180 ? 360 - d : d;
   }
 
   let oirRaton = null;
+  let soltarRaton = null;
+  let cuadro = 0;
+  let navegar = null;      // la página dice cómo entrar a una lista (por código o nombre)
+  let timerAviso = 0;
   let timerBoca = 0;
   let timerParpadeo = 0;
+  let grabacion = null;    // si está oyendo por el micrófono: se corta al salir
   let ctx = { personas: async () => [], actuar: async () => AYUDA };
   let estado = null;
 
   function quitar() {
     clearInterval(timerBoca);
     clearInterval(timerParpadeo);
-    if (oirRaton) document.removeEventListener("mousemove", oirRaton);
+    clearTimeout(timerAviso);
+    if (grabacion) { try { grabacion(); } catch { /* nada */ } grabacion = null; }
+    if (cuadro) cancelAnimationFrame(cuadro);
+    cuadro = 0;
+    if (oirRaton) {
+      document.removeEventListener("pointermove", oirRaton);
+      document.removeEventListener("pointerdown", oirRaton);
+    }
+    if (soltarRaton) document.removeEventListener("mouseout", soltarRaton);
     oirRaton = null;
+    soltarRaton = null;
     estado = null;
     document.getElementById("chat-asistente")?.remove();
   }
@@ -189,6 +294,21 @@
       personas: opciones.personas || (async () => []),
       actuar: opciones.actuar || (async () => AYUDA),
     };
+  }
+
+  /* La página dice cómo entrar a una lista o clase cuando se la piden en el chat. */
+  function alEntrar(fn) {
+    navegar = typeof fn === "function" ? fn : null;
+  }
+
+  /* Mensaje del asistente sin que nadie escriba (p. ej. «Entraste a la lista …»). */
+  function avisar(texto) {
+    if (estado && estado.avisar && texto) estado.avisar(String(texto));
+  }
+
+  /* Debajo del nombre «Asistente»: en qué lista o clase está el chat ahora. */
+  function lugar(texto) {
+    if (estado && estado.lugar) estado.lugar(texto ? String(texto) : "");
   }
 
   /* Botón flotante abajo a la derecha (tipo WhatsApp). Tras el login, en cualquier página. */
@@ -202,28 +322,55 @@
     let mirada = "ojos_centro";
     let abierto = false;
 
+    // Se cargan todas las caras de una vez: al mover el ratón no hay parpadeos blancos.
+    const precarga = ["reposo", "ojos_centro", ...MIRADAS.map(([n]) => n), "ojos_blink",
+      "boca_a", "boca_e", "boca_i", "boca_o", "boca_u", "boca_m"].map((n) => {
+      const im = new Image();
+      im.decoding = "async";
+      im.src = sprite(n);
+      return im;
+    });
+
     const burbuja = document.createElement("button");
     burbuja.type = "button";
     burbuja.className = "chat-burbuja";
     burbuja.setAttribute("aria-label", "Abrir el asistente");
     burbuja.setAttribute("aria-expanded", "false");
-    const fotoBurbuja = document.createElement("img");
-    fotoBurbuja.src = sprite("reposo");
-    fotoBurbuja.alt = "";
-    fotoBurbuja.draggable = false;
-    burbuja.append(fotoBurbuja);
+    /* Cada cara son dos fotos encimadas: la nueva aparece encima con un fundido corto
+       (al mirar a otro lado). Al hablar y parpadear se cambia al instante, como antes. */
+    function capas(clase) {
+      const hacer = (extra) => {
+        const im = document.createElement("img");
+        im.src = sprite("reposo");
+        im.alt = "";
+        im.draggable = false;
+        im.decoding = "async";
+        im.className = (clase ? clase + " " : "") + "cara-capa" + extra;
+        return im;
+      };
+      const a = hacer(" cara-capa-a");
+      const b = hacer(" cara-capa-b");
+      b.style.opacity = "0";
+      return { a, b, frente: a, timer: 0 };
+    }
+    const fotosBurbuja = capas("");
+    const fotoBurbuja = fotosBurbuja.a;
+    burbuja.append(fotosBurbuja.a, fotosBurbuja.b);
+
+    // Globito al lado del botón cuando el chat está cerrado (p. ej. «Entraste a la lista …»).
+    const aviso = document.createElement("button");
+    aviso.type = "button";
+    aviso.className = "chat-aviso";
+    aviso.hidden = true;
 
     const cabeza = document.createElement("div");
     cabeza.className = "chat-cabeza";
     const cara = document.createElement("div");
     cara.className = "asistente-cara";
     cara.setAttribute("aria-hidden", "true");
-    const foto = document.createElement("img");
-    foto.src = sprite("reposo");
-    foto.alt = "";
-    foto.className = "asistente-foto";
-    foto.draggable = false;
-    cara.append(foto);
+    const fotos = capas("asistente-foto");
+    const foto = fotos.a;
+    cara.append(fotos.a, fotos.b);
     const titulos = document.createElement("div");
     titulos.className = "chat-titulos";
     const nombreChat = document.createElement("strong");
@@ -249,25 +396,73 @@
       hilos.scrollTop = hilos.scrollHeight;
       return b;
     }
-    burbujaTexto("bot", "Hola. Escriba o mande audio. Por ejemplo: pon a Ana como presente.");
+    burbujaTexto("bot", "Hola. Escriba o mande audio. Por ejemplo: pon a Ana como presente, o entra a la lista 4821.");
     const caja = document.createElement("input");
     caja.className = "chat-caja";
     caja.type = "text";
     caja.placeholder = "Escriba un mensaje";
     caja.setAttribute("aria-label", "Escribir mensaje");
+    caja.enterKeyHint = "send";
     const enviar = document.createElement("button");
     enviar.type = "submit";
-    enviar.className = "chat-enviar";
+    enviar.className = "chat-enviar chat-redondo";
     enviar.setAttribute("aria-label", "Enviar");
-    enviar.textContent = "Enviar";
+    enviar.title = "Enviar";
+    enviar.append(iconoSvg(ICONO_ENVIAR));
+    enviar.hidden = true;
     const mic = document.createElement("button");
     mic.type = "button";
-    mic.className = "chat-mic";
-    mic.setAttribute("aria-label", "Mandar audio");
-    mic.textContent = "Audio";
+    mic.className = "chat-mic chat-redondo";
+    mic.setAttribute("aria-label", "Mandar audio (toque para hablar o mantenga presionado)");
+    mic.title = "Toque para hablar, o mantenga presionado y suelte para enviar";
+    mic.append(iconoSvg(ICONO_MIC));
+    // Barra mientras oye: basura · punto rojo + 0:00 · ondas · enviar (como WhatsApp)
+    const basura = document.createElement("button");
+    basura.type = "button";
+    basura.className = "chat-basura";
+    basura.setAttribute("aria-label", "Cancelar audio");
+    basura.title = "Cancelar";
+    basura.append(iconoSvg(ICONO_BASURA));
+    const punto = document.createElement("span");
+    punto.className = "chat-rec-punto";
+    punto.setAttribute("aria-hidden", "true");
+    const reloj = document.createElement("span");
+    reloj.className = "chat-rec-tiempo";
+    reloj.textContent = "0:00";
+    const ondas = document.createElement("span");
+    ondas.className = "chat-ondas";
+    ondas.setAttribute("aria-hidden", "true");
+    const barras = Array.from({ length: 22 }, () => {
+      const b = document.createElement("i");
+      ondas.append(b);
+      return b;
+    });
+    const deslizar = document.createElement("span");
+    deslizar.className = "chat-deslizar";
+    const deslizarTexto = document.createElement("span");
+    deslizarTexto.textContent = "‹ Desliza para cancelar";
+    deslizar.append(deslizarTexto);
+    const enviarAudio = document.createElement("button");
+    enviarAudio.type = "button";
+    enviarAudio.className = "chat-enviar chat-redondo";
+    enviarAudio.setAttribute("aria-label", "Enviar audio");
+    enviarAudio.title = "Enviar";
+    enviarAudio.append(iconoSvg(ICONO_ENVIAR));
+    const grabando = document.createElement("div");
+    grabando.className = "chat-grabando";
+    grabando.setAttribute("role", "status");
+    grabando.setAttribute("aria-label", "Oyendo");
+    grabando.hidden = true;
+    grabando.append(basura, punto, reloj, ondas, deslizar, enviarAudio);
     const form = document.createElement("form");
     form.className = "chat-barra";
-    form.append(mic, caja, enviar);
+    form.append(caja, enviar, mic, grabando);
+    const pintarBotones = () => {
+      const hay = !!caja.value.trim();
+      enviar.hidden = !hay;
+      mic.hidden = hay;
+    };
+    caja.addEventListener("input", pintarBotones);
     const panel = document.createElement("div");
     panel.className = "chat-panel";
     panel.hidden = true;
@@ -276,15 +471,41 @@
     const nodo = document.createElement("aside");
     nodo.id = "chat-asistente";
     nodo.className = "chat-flotante";
-    nodo.append(panel, burbuja);
+    nodo.append(panel, aviso, burbuja);
     document.body.append(nodo);
-    estado = { foto, fotoBurbuja, cara, caja };
 
-    function mostrarCara(nombre) {
+    const FUNDIDO_MS = 130;
+    function ponerFoto(par, url, suave) {
+      const actual = par.frente;
+      if (actual.getAttribute("src") === url) return;     // misma cara: no se vuelve a pedir
+      const otra = actual === par.a ? par.b : par.a;
+      clearTimeout(par.timer);
+      if (!suave || reducir) {
+        actual.src = url;
+        actual.style.transition = "none";
+        actual.style.opacity = "1";
+        otra.style.transition = "none";
+        otra.style.opacity = "0";
+        return;
+      }
+      // la nueva entra encima (opacidad 0 → 1); la de abajo se queda entera: no se ve el fondo
+      otra.style.transition = "none";
+      otra.style.opacity = "0";
+      otra.style.zIndex = "2";
+      actual.style.zIndex = "1";
+      otra.src = url;
+      void otra.offsetWidth;
+      otra.style.transition = `opacity ${FUNDIDO_MS}ms ease-out`;
+      otra.style.opacity = "1";
+      par.frente = otra;
+      par.timer = setTimeout(() => { actual.style.transition = "none"; actual.style.opacity = "0"; }, FUNDIDO_MS + 20);
+    }
+
+    function mostrarCara(nombre, suave) {
       const url = sprite(nombre);
       if (!parpadeo) {
-        foto.src = url;
-        if (!hablando) fotoBurbuja.src = url;
+        ponerFoto(fotos, url, suave);
+        if (!hablando) ponerFoto(fotosBurbuja, url, suave);
       }
     }
 
@@ -329,21 +550,93 @@
       panel.hidden = !abierto;
       burbuja.hidden = abierto;
       burbuja.setAttribute("aria-expanded", String(abierto));
-      if (abierto) caja.focus();
+      if (abierto) {
+        aviso.hidden = true;
+        burbuja.classList.remove("con-aviso");
+        caja.focus();
+      }
+      pedirCuadro();          // la cara cambió de sitio (botón ↔ panel): vuelve a apuntar al ratón
+    }
+
+    /* Mirada que sigue al ratón en toda la página.
+       - El punto al que mira se suaviza cuadro a cuadro (requestAnimationFrame): sin saltos.
+       - Zona muerta e histéresis: cerca de la cara mira al frente y no tiembla entre dos caras.
+       - La foto gira y se mueve un poco hacia el ratón (como si moviera la cabeza).
+       - Solo trabaja mientras el ratón se mueve; quieto no gasta nada. */
+    const reducir = !!(raiz.matchMedia && raiz.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    const objetivo = { x: null, y: null };
+    const suave = { x: 0, y: 0 };
+
+    function centroCara() {
+      const r = (abierto ? cara : burbuja).getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2, lado: Math.max(24, r.width || 0) };
+    }
+
+    function elegirMirada(dx, dy, lado) {
+      const zona = Math.max(30, lado * 0.7);
+      const dist = Math.hypot(dx, dy);
+      if (mirada === "ojos_centro" ? dist < zona * 1.2 : dist < zona * 0.8) return "ojos_centro";
+      const ang = Math.atan2(dy, dx) * 180 / Math.PI;
+      const actual = MIRADAS.find(([n]) => n === mirada);
+      if (actual && difAngulo(ang, actual[1]) < 22.5 + 9) return mirada;     // histéresis: no tiembla en el borde
+      let mejor = MIRADAS[0];
+      for (const m of MIRADAS) if (difAngulo(ang, m[1]) < difAngulo(ang, mejor[1])) mejor = m;
+      return mejor[0];
+    }
+
+    function girarCabeza() {
+      if (reducir) return;
+      const d = Math.hypot(suave.x, suave.y);
+      const fuerza = Math.min(1, d / 320);
+      const gx = d ? (suave.x / d) * fuerza : 0;
+      const gy = d ? (suave.y / d) * fuerza : 0;
+      const t = `translate3d(${(gx * 4).toFixed(2)}px, ${(gy * 3).toFixed(2)}px, 0) rotate(${(gx * 6).toFixed(2)}deg) scale(1.06)`;
+      for (const im of [fotos.a, fotos.b, fotosBurbuja.a, fotosBurbuja.b]) im.style.transform = t;
+    }
+
+    function cuadroMirada() {
+      cuadro = 0;
+      if (!nodo.isConnected) return;
+      const c = centroCara();
+      const tx = objetivo.x === null ? 0 : objetivo.x - c.x;
+      const ty = objetivo.y === null ? 0 : objetivo.y - c.y;
+      const k = reducir ? 1 : 0.2;
+      suave.x += (tx - suave.x) * k;
+      suave.y += (ty - suave.y) * k;
+      const nueva = elegirMirada(suave.x, suave.y, c.lado);
+      if (nueva !== mirada) {
+        mirada = nueva;
+        if (!hablando && !parpadeo) mostrarCara(mirada, true);
+      }
+      girarCabeza();
+      if (Math.abs(tx - suave.x) > 0.6 || Math.abs(ty - suave.y) > 0.6) cuadro = requestAnimationFrame(cuadroMirada);
+    }
+
+    function pedirCuadro() {
+      if (!cuadro) cuadro = requestAnimationFrame(cuadroMirada);
     }
 
     oirRaton = (ev) => {
-      const r = (abierto ? cara : burbuja).getBoundingClientRect();
-      mirada = miradaDe(ev.clientX - (r.left + r.width / 2), ev.clientY - (r.top + r.height / 2));
-      if (!hablando && !parpadeo) mostrarCara(mirada);
+      objetivo.x = ev.clientX;
+      objetivo.y = ev.clientY;
+      pedirCuadro();
     };
-    document.addEventListener("mousemove", oirRaton);
+    soltarRaton = (ev) => {
+      if (ev.relatedTarget) return;      // sigue dentro de la página
+      objetivo.x = null;                 // salió de la ventana: vuelve a mirar al frente
+      objetivo.y = null;
+      pedirCuadro();
+    };
+    document.addEventListener("pointermove", oirRaton, { passive: true });
+    document.addEventListener("pointerdown", oirRaton, { passive: true });
+    document.addEventListener("mouseout", soltarRaton);
+    girarCabeza();
     timerParpadeo = setInterval(() => {
       if (!nodo.isConnected || hablando) return;
       parpadeo = true;
       const url = sprite("ojos_blink");
-      foto.src = url;
-      fotoBurbuja.src = url;
+      ponerFoto(fotos, url, false);
+      ponerFoto(fotosBurbuja, url, false);
       setTimeout(() => {
         parpadeo = false;
         if (!hablando) mostrarCara(mirada);
@@ -351,9 +644,29 @@
     }, 3800);
 
     function mostrar(texto) {
+      if (!texto) return;     // p. ej. al entrar a una lista: el aviso «Entraste a…» llega solo
       burbujaTexto("bot", texto).dataset.fijo = "1";
       decir(texto);
     }
+
+    function avisarAqui(texto) {
+      burbujaTexto("bot", texto).dataset.fijo = "1";
+      if (abierto) { decir(texto); return; }
+      animarBoca(texto);
+      setTimeout(callar, Math.min(2600, Math.max(700, texto.length * 45)));
+      aviso.textContent = texto;
+      aviso.hidden = false;
+      burbuja.classList.add("con-aviso");
+      clearTimeout(timerAviso);
+      timerAviso = setTimeout(() => { aviso.hidden = true; }, 6000);
+    }
+
+    function ponerLugar(texto) {
+      estadoChat.textContent = texto || "En línea";
+      estadoChat.title = texto || "";
+    }
+
+    estado = { foto, fotoBurbuja, cara, caja, precarga, avisar: avisarAqui, lugar: ponerLugar };
 
     async function turno(texto) {
       const orden = interpretar(texto);
@@ -377,6 +690,11 @@
         return ctx.actuar({ accion: pendiente.accion, elegidos });
       }
       aclaracion = null;
+      if (orden.accion === "entrar") {
+        if (!orden.codigo && !orden.nombre) return "Dime el código de 4 números de la lista, o el nombre de la clase. Por ejemplo: entra a la lista 4821.";
+        if (!navegar) return "Aquí no puedo cambiar de lista. Vuelva a Mis clases.";
+        return navegar({ codigo: orden.codigo, nombre: orden.nombre, tipo: orden.tipo });
+      }
       if (orden.accion === "ayuda") return AYUDA;
       if (orden.accion === "falta_nombre") return "Dime el nombre. Por ejemplo: pon a Ana como presente.";
       if (orden.accion === "no") return "No entendí. " + AYUDA;
@@ -393,6 +711,7 @@
     }
 
     burbuja.addEventListener("click", () => abrir(true));
+    aviso.addEventListener("click", () => abrir(true));
     cerrar.addEventListener("click", () => abrir(false));
     form.addEventListener("submit", async (ev) => {
       ev.preventDefault();
@@ -400,6 +719,7 @@
       if (!texto || ocupado) return;
       ocupado = true;
       caja.value = "";
+      pintarBotones();
       burbujaTexto("yo", texto).dataset.fijo = "1";
       cara.dataset.modo = "oye";
       try { mostrar(await turno(texto)); }
@@ -407,30 +727,160 @@
       if (!hablando) cara.dataset.modo = "";
       ocupado = false;
     });
-    mic.addEventListener("click", async () => {
-      if (ocupado) return;
+    /* Micrófono estilo WhatsApp.
+       - Toque: empieza a oír y queda la barra con basura (cancelar) y enviar.
+       - Mantener presionado: oye mientras lo tiene; al soltar envía; deslizar a la izquierda cancela.
+       - Si no toca nada, termina solo cuando deja de hablar (como antes).
+       El texto que se oye pasa por el mismo camino que lo escrito. */
+    let oyendo = null;          // { control, inicio, timer, medidor }
+    let mantener = null;        // { x, t, id } mientras se mantiene presionado
+
+    function medirVoz() {
+      // Ondas con el nivel real de la voz si el navegador deja (computador). En el celular se
+      // dibujan solas, para no pelear por el micrófono con el reconocimiento de voz.
+      const tactil = !!(raiz.matchMedia && raiz.matchMedia("(pointer: coarse)").matches);
+      const AC = raiz.AudioContext || raiz.webkitAudioContext;
+      const md = raiz.navigator && raiz.navigator.mediaDevices;
+      const med = { parar() {}, real: false };
+      if (tactil || !AC || !md || !md.getUserMedia) return med;
+      let vivo = true;
+      let pista = null;
+      let ctxAudio = null;
+      let raf = 0;
+      med.parar = () => {
+        vivo = false;
+        cancelAnimationFrame(raf);
+        if (pista) pista.getTracks().forEach((t) => t.stop());
+        if (ctxAudio) ctxAudio.close().catch(() => {});
+        barras.forEach((b) => { b.style.transform = ""; });
+        grabando.classList.remove("nivel-real");
+      };
+      md.getUserMedia({ audio: true }).then((st) => {
+        if (!vivo) { st.getTracks().forEach((t) => t.stop()); return; }
+        pista = st;
+        ctxAudio = new AC();
+        const an = ctxAudio.createAnalyser();
+        an.fftSize = 256;
+        ctxAudio.createMediaStreamSource(st).connect(an);
+        const datos = new Uint8Array(an.fftSize);
+        const historia = barras.map(() => 0.18);
+        let ultimo = 0;
+        grabando.classList.add("nivel-real");
+        med.real = true;
+        const pintar = (t) => {
+          if (!vivo) return;
+          raf = requestAnimationFrame(pintar);
+          if (t - ultimo < 70) return;
+          ultimo = t;
+          an.getByteTimeDomainData(datos);
+          let suma = 0;
+          for (const v of datos) suma += ((v - 128) / 128) ** 2;
+          const nivel = Math.min(1, Math.sqrt(suma / datos.length) * 4.5);
+          historia.shift();
+          historia.push(Math.max(0.18, nivel));
+          barras.forEach((b, i) => { b.style.transform = `scaleY(${historia[i].toFixed(2)})`; });
+        };
+        raf = requestAnimationFrame(pintar);
+      }).catch(() => { /* sin permiso para medir: quedan las ondas animadas */ });
+      return med;
+    }
+
+    function pintarReloj() {
+      if (!oyendo) return;
+      const s = Math.floor((Date.now() - oyendo.inicio) / 1000);
+      reloj.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    }
+
+    function terminarOido() {
+      if (!oyendo) return;
+      clearInterval(oyendo.timer);
+      oyendo.medidor.parar();
+      oyendo = null;
+      grabacion = null;
+      mantener = null;
+      form.classList.remove("grabando", "manteniendo");
+      grabando.hidden = true;
+      grabando.style.removeProperty("--arrastre");
+      mic.classList.remove("escuchando");
+      reloj.textContent = "0:00";
+      pintarBotones();
+    }
+
+    async function empezarOido(conMantener) {
+      if (ocupado || oyendo) return;
       ocupado = true;
       abrir(true);
+      const control = escuchar();
+      oyendo = { control, inicio: Date.now(), timer: 0, medidor: { parar() {} } };
+      grabacion = () => control.cancelar();
       cara.dataset.modo = "oye";
       mic.classList.add("escuchando");
-      burbujaTexto("bot", "Lo escucho…");
+      form.classList.add("grabando");
+      form.classList.toggle("manteniendo", !!conMantener);
+      grabando.hidden = false;
+      reloj.textContent = "0:00";
+      oyendo.timer = setInterval(pintarReloj, 250);
+      oyendo.medidor = medirVoz();
       try {
-        const texto = await escuchar();
-        if (!texto) mostrar("No oí nada. Intente otra vez o escríbalo.");
+        const texto = await control.promesa;
+        terminarOido();
+        if (texto === null) burbujaTexto("bot", "Audio cancelado.");
+        else if (!texto) mostrar("No oí nada. Intente otra vez o escríbalo.");
         else {
           burbujaTexto("yo", texto).dataset.fijo = "1";
           mostrar(await turno(texto));
         }
       } catch (e) {
+        terminarOido();
         mostrar(e.message === "sin_oido"
           ? "Este navegador no tiene micrófono de voz. Escríbame el mensaje."
           : (e.message || "No pude oír."));
       }
-      mic.classList.remove("escuchando");
       if (!hablando) cara.dataset.modo = "";
       ocupado = false;
+    }
+
+    function enviarOido() { if (oyendo) oyendo.control.enviar(); }
+    function cancelarOido() { if (oyendo) oyendo.control.cancelar(); }
+
+    mic.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== undefined && ev.button !== 0) return;
+      if (ocupado || oyendo) return;
+      ev.preventDefault();
+      mantener = { x: ev.clientX, t: Date.now(), id: ev.pointerId };
+      try { mic.setPointerCapture(ev.pointerId); } catch { /* nada */ }
+      empezarOido(true);
     });
+    mic.addEventListener("pointermove", (ev) => {
+      if (!mantener || !oyendo || ev.pointerId !== mantener.id) return;
+      const dx = Math.min(0, ev.clientX - mantener.x);
+      grabando.style.setProperty("--arrastre", `${Math.max(-120, dx)}px`);
+      if (dx < -90) { mantener = null; cancelarOido(); }
+    });
+    const soltar = (ev) => {
+      if (!mantener || ev.pointerId !== mantener.id) return;
+      const largo = Date.now() - mantener.t;
+      mantener = null;
+      form.classList.remove("manteniendo");
+      grabando.style.removeProperty("--arrastre");
+      if (ev.type === "pointercancel") return;     // el navegador se lo quitó: queda la barra con sus botones
+      if (largo > 450) enviarOido();               // lo mantuvo presionado: al soltar se envía
+      // toque corto: sigue oyendo, con la barra de basura y enviar (como WhatsApp con el candado)
+    };
+    mic.addEventListener("pointerup", soltar);
+    mic.addEventListener("pointercancel", soltar);
+    mic.addEventListener("click", (ev) => {
+      // teclado (Enter/Espacio) o lectores de pantalla: no pasan por pointerdown
+      if (ev.detail === 0 && !oyendo) empezarOido(false);
+    });
+    mic.addEventListener("contextmenu", (ev) => ev.preventDefault());
+    mic.addEventListener("touchend", (ev) => ev.preventDefault(), { passive: false });   // sin «clic fantasma» al soltar
+    // En el celular, el clic que sigue al toque cae donde estaba el micrófono (ahora el botón enviar):
+    // los botones de la barra no hacen caso al primer medio segundo.
+    const recien = () => !oyendo || Date.now() - oyendo.inicio < 500;
+    basura.addEventListener("click", () => { if (!recien()) cancelarOido(); });
+    enviarAudio.addEventListener("click", () => { if (!recien()) enviarOido(); });
   }
 
-  raiz.Asistente = { normalizar, interpretar, resolverNombres, montar, contexto, quitar, AYUDA };
+  raiz.Asistente = { normalizar, interpretar, resolverNombres, montar, contexto, quitar, alEntrar, avisar, lugar, AYUDA };
 })(typeof window !== "undefined" ? window : globalThis);

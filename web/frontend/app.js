@@ -9,6 +9,7 @@ const est = {
   usuario: leer("asis_usuario"),
   sondeo: null,
   fotos: new Map(),     // ruta → URL blob (selfies y fotos ya cargadas: no se vuelven a pedir)
+  lugar: "",            // clase o lista donde está el chat ahora («clase:<id>» / «lista:<id>»)
 };
 const enc = encodeURIComponent;
 const esTactil = window.matchMedia("(pointer: coarse)").matches;
@@ -155,25 +156,90 @@ function salirLocal() {
   guardar("asis_token", ""); guardar("asis_usuario", "");
   for (const u of est.fotos.values()) URL.revokeObjectURL(u);
   est.fotos.clear();
+  est.lugar = "";
   if (window.Asistente) Asistente.quitar();
+}
+
+/* ------------------------------------------------------------------ chat: entrar a una lista */
+function chipCodigo(codigo) {
+  return codigo ? el("span", { class: "chip chip-codigo", title: "Escríbalo en el chat para entrar aquí", text: `Código ${codigo}` }) : null;
+}
+
+/** El chat queda con esta clase o lista como contexto y avisa «Entraste a …» (una vez por lugar). */
+function anunciarLugar(clave, etiqueta, texto) {
+  if (!window.Asistente || !est.token) return;
+  Asistente.lugar(etiqueta);
+  if (est.lugar === clave) return;
+  est.lugar = clave;
+  Asistente.avisar(texto);
+}
+
+function salirDeLugar() {
+  est.lugar = "";
+  if (window.Asistente) Asistente.lugar("");
+}
+
+function textoLista(a) {
+  return `la lista de ${a.clase || a.nombre || "la clase"}${a.creada ? ` del ${fechaLarga(a.creada)}` : ""}`;
+}
+
+/** «entra a la lista 4821» / «4821» / «abre la clase Computación 2»: lleva a esa clase o lista. */
+async function entrarDesdeChat(orden) {
+  let destino = null;
+  if (orden.codigo) {
+    try { destino = await api(`/api/codigos/${enc(orden.codigo)}`); }
+    catch (e) {
+      const resto = Asistente.normalizar(orden.nombre).replace(orden.codigo, "").trim();
+      if (!resto) return `No encontré ninguna lista ni clase con el código ${orden.codigo}. Revise el número que aparece junto a cada lista.`;
+    }
+  }
+  if (!destino) {
+    const q = Asistente.normalizar(orden.nombre);
+    if (!q) return "Dime el código de 4 números de la lista, o el nombre de la clase.";
+    const clases = await api("/api/clases");
+    const palabras = q.split(" ").filter(Boolean);
+    const exactas = clases.filter((c) => Asistente.normalizar(c.nombre) === q || Asistente.normalizar(c.id) === q);
+    const parecidas = exactas.length ? exactas : clases.filter((c) => {
+      const p = Asistente.normalizar(c.nombre).split(" ");
+      return palabras.every((w) => p.some((x) => x.startsWith(w)));
+    });
+    if (!parecidas.length) return `No encontré una clase o lista llamada «${orden.nombre}». Dime su código de 4 números.`;
+    if (parecidas.length > 1) {
+      return `Hay ${parecidas.length} clases con ese nombre: ${parecidas.slice(0, 6).map((c) => `${c.nombre} (código ${c.codigo})`).join("; ")}. Dime el código.`;
+    }
+    const c = parecidas[0];
+    destino = { tipo: "clase", id: c.id, clase_id: c.id, nombre: c.nombre, codigo: c.codigo };
+  }
+  const ruta = destino.tipo === "clase" ? `#/clase/${enc(destino.id)}/lista` : `#/lista/${enc(destino.id)}`;
+  const clave = `${destino.tipo}:${destino.id}`;
+  const etiqueta = destino.tipo === "clase" ? `la clase ${destino.nombre}` : textoLista({ clase: destino.nombre, creada: destino.creada });
+  if (est.lugar === clave) {
+    if (location.hash !== ruta) irA(ruta);
+    return `Ya estás en ${etiqueta} (código ${destino.codigo}).`;
+  }
+  irA(ruta);
+  return null;      // el aviso «Entraste a …» lo da la página al abrirse
 }
 
 function chatGeneral() {
   if (!window.Asistente || !est.token) return;
+  Asistente.alEntrar(entrarDesdeChat);
   Asistente.montar({
     personas: async () => [],
     actuar: async (pedido) => {
       if (pedido.accion === "pasar") return "Abra una clase y use «Pasar lista» con la foto del salón. El reconocimiento lo hace el sistema de siempre.";
       if (pedido.accion === "presente" || pedido.accion === "ausente") return "Eso se hace dentro de una lista ya hecha. Ábrala en Historial.";
       if (pedido.accion === "agregar" || pedido.accion === "quitar") return "Para agregar o quitar estudiantes entre a una clase, pestaña Estudiantes.";
-      return "Abra una clase o una lista para que yo pueda ayudarle ahí.";
+      return "Abra una clase o una lista para que yo pueda ayudarle ahí. También puede decirme su código: entra a la lista 4821.";
     },
   });
+  Asistente.alEntrar(entrarDesdeChat);
 }
 
 function chatDeClase(c, contenido, pestana) {
   if (!window.Asistente || !est.token) return;
   Asistente.montar();
+  Asistente.alEntrar(entrarDesdeChat);
   Asistente.contexto({
     personas: () => api(`/api/clases/${enc(c.id)}/estudiantes`).then((al) => al.map((x) => ({ id: x.codigo, nombre: x.nombre }))),
     actuar: (pedido) => actuarEnClase(c, contenido, pestana, pedido),
@@ -296,6 +362,7 @@ function cabecera() {
 async function vistaClases() {
   poner(cargando("Cargando tus clases…"));
   chatGeneral();
+  salirDeLugar();
   const clases = await api("/api/clases");
   const nombre = el("input", { class: "field grow", placeholder: "Nombre de la clase (ej. Computación 2 · Grupo A)", maxlength: 120, required: true, "aria-label": "Nombre de la clase" });
   const crear = el("button", { class: "btn btn-primary", type: "submit", text: "Crear clase" });
@@ -313,13 +380,14 @@ async function vistaClases() {
         el("div", { class: "row" },
           el("div", { class: "grow" }, el("h2", { class: "brand h2", text: c.nombre }),
             el("p", { class: "muted small", style: { margin: "4px 0 0" }, text: `${c.estudiantes} estudiantes · ${c.listas} listas` })),
+          chipCodigo(c.codigo),
           el("span", { class: "flecha", "aria-hidden": "true", text: "→" }))))
     : [el("p", { class: "vacio fade-in", text: "Aún no hay clases. Crea la primera arriba." })];
 
   poner(el("main", { class: "page-shell" }, cabecera(),
     el("section", { class: "glass pad fade-in", style: { marginTop: "28px" } },
       el("h1", { class: "brand h1", text: "Tus clases" }),
-      el("p", { class: "muted", style: { margin: "6px 0 0" }, text: "Entra a una clase para registrar estudiantes y pasar lista con una foto." }),
+      el("p", { class: "muted", style: { margin: "6px 0 0" }, text: "Entra a una clase para registrar estudiantes y pasar lista con una foto. En el chat también puedes escribir su código." }),
       form, error),
     el("section", { class: "stack", style: { marginTop: "18px" } }, lista)));
 }
@@ -419,7 +487,8 @@ async function vistaClase(id, pestana) {
     el("div", { class: "fade-in", style: { marginTop: "22px" } },
       el("a", { class: "back", href: "#/clases", text: "← Mis clases" }),
       el("h1", { class: "brand h1", style: { marginTop: "6px" }, text: c.nombre }),
-      el("p", { class: "muted small", style: { margin: "4px 0 0" }, text: `${c.estudiantes} estudiantes · ${c.listas} listas` })),
+      el("div", { class: "row", style: { gap: "8px", marginTop: "4px" } },
+        el("span", { class: "muted small", text: `${c.estudiantes} estudiantes · ${c.listas} listas` }), chipCodigo(c.codigo))),
     el("nav", { class: "tabs fade-in", style: { marginTop: "18px" }, "aria-label": "Secciones" },
       pest("lista", "Pasar lista"), pest("estudiantes", "Estudiantes"), pest("historial", "Historial")),
     contenido));
@@ -427,6 +496,10 @@ async function vistaClase(id, pestana) {
   else if (pestana === "estudiantes") await pestanaEstudiantes(c, contenido);
   else await pestanaHistorial(c, contenido);
   chatDeClase(c, contenido, pestana);
+  const hacer = pestana === "lista" ? "Sube la foto del salón para pasar lista."
+    : pestana === "estudiantes" ? "Aquí puedes registrar o quitar estudiantes." : "Aquí están sus listas pasadas, cada una con su código.";
+  anunciarLugar(`clase:${c.id}`, c.codigo ? `Clase ${c.codigo} · ${c.nombre}` : c.nombre,
+    `Entraste a la clase ${c.nombre}${c.codigo ? ` (código ${c.codigo})` : ""}. ${hacer}`);
 }
 
 function pestanaPasar(c, cont) {
@@ -570,7 +643,8 @@ async function pestanaHistorial(c, cont) {
             a.por_revisar ? el("span", { class: "chip chip-warn", text: `${a.por_revisar} por revisar` }) : null,
             el("span", { class: "chip chip-bad", text: `${a.ausentes} ausentes` }),
           ] : el("span", { class: a.estado === "error" ? "chip chip-bad" : "chip chip-gris", text: a.estado === "error" ? "no se pudo" : "procesando…" }),
-          a.de_la_ventana ? el("span", { class: "chip chip-gris", text: "desde el computador" }) : null)),
+          a.de_la_ventana ? el("span", { class: "chip chip-gris", text: "desde el computador" }) : null,
+          chipCodigo(a.codigo))),
       el("span", { class: "flecha", "aria-hidden": "true", text: "→" }))))));
 }
 
@@ -582,7 +656,13 @@ async function vistaLista(id) {
   chatGeneral();
   const a = await api(`/api/asistencias/${enc(id)}`);
   const volver = el("a", { class: "back", href: `#/clase/${enc(a.clase_id)}/lista`, text: `← ${a.clase}` });
-  if (a.estado === "procesando") return esperar(a, volver);
+  const etiqueta = a.codigo ? `Lista ${a.codigo} · ${a.clase}` : `Lista de ${a.clase}`;
+  const entraste = `Entraste a ${textoLista(a)}${a.codigo ? ` (código ${a.codigo})` : ""}.`;
+  if (a.estado === "procesando") {
+    esperar(a, volver);
+    anunciarLugar(`lista:${a.id}`, etiqueta, `${entraste} Estoy reconociendo las caras, ya casi.`);
+    return;
+  }
   if (a.estado === "error") {
     poner(el("main", { class: "page-shell" }, cabecera(), el("div", { class: "stack", style: { marginTop: "22px" } }, volver,
       el("section", { class: "glass pad stack" }, el("h1", { class: "brand h2", text: "No se pudo pasar lista" }), errorMsg(new Error(a.error || "Error")),
@@ -590,9 +670,12 @@ async function vistaLista(id) {
           el("a", { class: "btn btn-primary", href: `#/clase/${enc(a.clase_id)}/lista`, text: "Intentar con otra foto" }),
           el("button", { class: "btn btn-danger", type: "button", text: "Descartar", onclick: () => borrarLista(a) }))))));
     chatGeneral();
+    anunciarLugar(`lista:${a.id}`, etiqueta, `${entraste} Esta no se pudo pasar: intente con otra foto.`);
     return;
   }
   mostrarLista(a, volver);
+  const cuenta = `${a.presentes} presentes${a.por_revisar ? `, ${a.por_revisar} por revisar` : ""} y ${a.ausentes} ausentes`;
+  anunciarLugar(`lista:${a.id}`, etiqueta, `${entraste} Tiene ${cuenta}. Puedes decirme: pon a Ana como presente.`);
 }
 
 function esperar(a, volver) {
@@ -776,7 +859,7 @@ function mostrarLista(a, volver) {
     el("div", { class: "fade-in", style: { marginTop: "22px" } }, volver,
       el("h1", { class: "brand h1", style: { marginTop: "6px" }, text: fechaCorta(a.creada) }),
       el("p", { class: "muted small", style: { margin: "2px 0 10px" }, text: primeraMayus(fechaLarga(a.creada)) }),
-      el("div", { class: "row", style: { gap: "8px" } }, descargar, botonCaras,
+      el("div", { class: "row", style: { gap: "8px" } }, chipCodigo(a.codigo), descargar, botonCaras,
         el("button", { class: "btn btn-danger btn-sm", type: "button", text: "Borrar", onclick: () => borrarLista(a) }))),
     el("div", { class: "stack", style: { marginTop: "14px" } }, conteo, zonaAvisos,
       el("section", { class: "glass pad stack fade-in" }, marco, zonaFicha,
@@ -792,6 +875,7 @@ function mostrarLista(a, volver) {
 function chatDeLista(a, regs, pintar) {
   if (!window.Asistente || !est.token) return;
   Asistente.montar();
+  Asistente.alEntrar(entrarDesdeChat);
   Asistente.contexto({
     personas: () => regs.map((r) => ({ id: r.codigo, nombre: r.nombre })),
     actuar: async (pedido) => {
