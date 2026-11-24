@@ -48,3 +48,46 @@ cd D:\Vision_Computacional_Final
 ```
 
 Secuencia IA: `docs/SECUENCIA_IA.md`
+
+## Procesamiento de lenguaje natural (chat del asistente)
+
+No usa spaCy, NLTK ni un modelo propio. El chat entiende órdenes en español con **reglas**
+(expresiones regulares) y, solo en la web, un **respaldo con la API de Gemini** si las reglas
+no entendieron la frase. **No toca el reconocimiento de caras** ni reentrena nada.
+
+### Cómo se explica (cuatro pasos)
+
+1. **Normalizar** — minúsculas y sin tildes («Sebastián» = «sebastian»).
+2. **Interpretar** — de la frase saca la acción (`presente`, `ausente`, `quitar`, `agregar`,
+   `pasar`, `entrar`…) y los nombres.
+3. **Resolver nombres** — busca en la lista real. Si hay dos iguales, no adivina: pide apellido,
+   id o el número de la opción.
+4. **Ejecutar** — la ventana o la página hacen el cambio con los mismos botones/APIs de siempre
+   y responden «Listo».
+
+### Dónde está el código
+
+| Pieza | Archivo |
+|---|---|
+| Reglas (escritorio) | `ui/asistente.py` |
+| Reglas + chat web | `web/frontend/asistente.js` |
+| Respaldo Gemini (solo servidor) | `web/frontend/chat_llm.py` → `POST /api/chat/interpretar` |
+| Conectar el chat a las APIs | `web/frontend/app.js` |
+
+### Gemini (solo web, solo si hace falta)
+
+1. Primero corren las **reglas** (rápido, sin internet).
+2. Si la acción sale `no` («no entendí»), el navegador pide al servidor
+   `POST /api/chat/interpretar`.
+3. El servidor llama a **Gemini** (`GEMINI_API_KEY` en `web/.env`). Gemini solo devuelve una
+   orden del mismo tipo (JSON). Los nombres vuelven a pasar por el buscador de la lista;
+   eliminar sigue pidiendo «sí / no».
+4. Si no hay clave, Gemini tarda o falla, el chat responde «No entendí» como antes.
+
+Variables en `web/.env` (ver `web/.env.ejemplo`):
+
+- `GEMINI_API_KEY` — clave de Google AI Studio (solo en el servidor; no va en git ni en el JS).
+- `GEMINI_MODELO` — por defecto `gemini-2.5-flash-lite`.
+- `GEMINI_TIMEOUT` — segundos máximos (por defecto 2.5).
+
+La ventana de escritorio (`lanzar_ui.py`) sigue solo con reglas; no usa Gemini.

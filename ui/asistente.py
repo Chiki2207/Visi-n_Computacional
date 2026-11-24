@@ -9,6 +9,9 @@ Para explicarlo, son cuatro pasos y nada más:
 4. La ventana ejecuta esa acción con los mismos botones de siempre y responde «Listo».
 
 La página web usa los mismos cuatro pasos en web/frontend/asistente.js.
+En la web, si las reglas no entienden la frase, hay un respaldo opcional con Gemini
+(web/frontend/chat_llm.py). Esta ventana de escritorio no usa Gemini: solo reglas.
+Documentado al final del README.md del proyecto.
 """
 
 from __future__ import annotations

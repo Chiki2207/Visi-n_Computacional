@@ -2,9 +2,14 @@
    Son los mismos cuatro pasos que ui/asistente.py:
 
    1. normalizar: minúsculas y sin tildes.
-   2. interpretar: saca la acción y los nombres.
+   2. interpretar: saca la acción y los nombres (reglas / expresiones regulares).
    3. resolverNombres: busca en la lista. Si hay dos iguales, no elige.
    4. La página ejecuta esa acción con las rutas que ya tenía (presente, ausente, agregar, quitar).
+
+   Respaldo (solo web): si interpretar() da «no», app.js puede pedir a Gemini
+   (POST /api/chat/interpretar → chat_llm.py). Gemini solo propone la orden; los nombres
+   vuelven a pasar por resolverNombres y eliminar pide «sí / no». Sin clave o si falla,
+   el chat responde «No entendí» como antes. Documentado al final del README.md del proyecto.
 */
 (function (raiz) {
   "use strict";

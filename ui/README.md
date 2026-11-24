@@ -46,3 +46,10 @@ no se comprime) o tomada más cerca. Si la foto tiene solo 1600 px de lado, el a
 Se abren JPG, PNG, WebP y **HEIC** (iPhone). La foto original del celular suele venir acostada con
 una marca de giro (EXIF): el programa la endereza igual para reconocer y para dibujar las cajas.
 Una foto grande tarda más (una de 3088 px tardó 105 s) pero trae unas 2,5 veces más píxeles por cara.
+
+## Asistente (lenguaje natural)
+
+El panel del asistente en la ventana (`asistente.py`) entiende órdenes en español con
+**reglas** (sin librería de NLP ni Gemini). Cuatro pasos: normalizar → interpretar →
+resolver nombres → la ventana ejecuta con los mismos botones. La web tiene las mismas
+reglas y, además, un respaldo opcional con Gemini. Detalle al final del `README.md` del proyecto.

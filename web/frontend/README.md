@@ -12,3 +12,17 @@ web\frontend\.venv\Scripts\python.exe web\frontend\gestionar.py crear-usuario --
 ```
 
 Docentes en `web/usuarios.json` (claves cifradas). Ver `web/README.md`.
+
+## Chat / procesamiento de lenguaje natural
+
+El asistente flotante (abajo a la derecha) entiende texto y voz. **No llama al motor de caras.**
+
+1. **Reglas** en `asistente.js` (igual idea que `ui/asistente.py`): normalizar → interpretar →
+   resolver nombres → `app.js` ejecuta con las rutas que ya tenía (presente, ausente, quitar…).
+2. **Respaldo Gemini** solo si las reglas no entendieron: `app.js` llama
+   `POST /api/chat/interpretar` → `chat_llm.py` (clave `GEMINI_API_KEY` en `web/.env`).
+   Gemini no marca asistencia solo: devuelve una orden y la página la aplica con el mismo
+   camino (nombres contra la lista real; eliminar pide confirmación).
+
+Sin clave o si Gemini falla/tarda, el chat queda igual que solo con reglas. Detalle en el
+README raíz, sección «Procesamiento de lenguaje natural».

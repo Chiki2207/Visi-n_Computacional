@@ -108,3 +108,12 @@ web\frontend\.venv\Scripts\python.exe web\frontend\gestionar.py crear-usuario --
 web\frontend\.venv\Scripts\python.exe web\frontend\gestionar.py cambiar-clave --usuario profe
 web\frontend\.venv\Scripts\python.exe web\frontend\gestionar.py desactivar --usuario profe
 ```
+
+## Chat (lenguaje natural + Gemini opcional)
+
+El chat de la página usa reglas en `web/frontend/asistente.js`. Si una frase no encaja, el
+servidor puede preguntar a Gemini (`web/frontend/chat_llm.py`) solo para interpretar; la
+asistencia ejecuta la orden con las APIs de siempre. Hace falta `GEMINI_API_KEY` en `web/.env`
+(ver `web/.env.ejemplo`). Sin esa clave el chat sigue funcionando solo con reglas.
+
+Explicación completa al final del `README.md` del proyecto.
