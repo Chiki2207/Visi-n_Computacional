@@ -67,6 +67,19 @@ from pydantic import BaseModel, Field  # noqa: E402
 
 from app.excel_clase import cargar_estudiantes, guardar_lista  # noqa: E402  (los mismos de la ventana)
 
+
+def _cargar_chat_llm():
+    """Respaldo del chat (Gemini). Se carga por su ruta: no cambia sys.path ni toca la IA."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("chat_llm", CARPETA / "chat_llm.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+chat_llm = _cargar_chat_llm()
+
 try:
     import pillow_heif
 
@@ -448,10 +461,25 @@ def _huellas_al_arrancar() -> None:
         time.sleep(30)
 
 
+async def _chat_tibio() -> None:
+    """Mantiene abierta la conexión con Gemini (sin gastar: solo lee la ficha del modelo), para que
+    una frase rara no tenga que esperar a conectar. Solo si hay GEMINI_API_KEY."""
+    import asyncio
+
+    while chat_llm.disponible():
+        await chat_llm.interprete.calentar()
+        await asyncio.sleep(90)
+
+
 @asynccontextmanager
 async def _vida(_app):
+    import asyncio
+
     threading.Thread(target=_huellas_al_arrancar, daemon=True, name="huellas-inicio").start()
+    tibio = asyncio.create_task(_chat_tibio())
     yield
+    tibio.cancel()
+    await chat_llm.interprete.cerrar()
 
 
 app = FastAPI(title="Asistencia web", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_vida)
@@ -848,13 +876,34 @@ def borrar_estudiante(clase: str, codigo: str, _u=Usr) -> dict:
         enc = [str(x.value or "").strip().lower() for x in ws[1]]
         col_foto = next((enc.index(n) for n in ("ruta_imagen", "foto", "imagen", "ruta", "path") if n in enc), 2) + 1
         rel = ws.cell(i, col_foto).value
+        fila = {str(ws.cell(1, j).value or f"col{j}"): ws.cell(i, j).value for j in range(1, ws.max_column + 1)}
         ws.delete_rows(i)
         _guardar_excel(wb, excel)
+    papelera = c / "fotos" / "_borradas"
+    guardada = None
     if rel:
         foto = (c / str(rel)).resolve()
-        if c in foto.parents:
-            _a_papelera(foto, c / "fotos" / "_borradas")
+        if c in foto.parents and foto.is_file() and _a_papelera(foto, papelera):
+            movidas = sorted(papelera.glob(f"*_{foto.name}"), key=lambda p: p.stat().st_mtime)
+            guardada = f"fotos/_borradas/{movidas[-1].name}" if movidas else None
+    _anotar_quitado(papelera, codigo, fila, guardada)
     return {"ok": True}
+
+
+def _anotar_quitado(papelera: Path, codigo: str, fila: dict, foto: str | None) -> None:
+    """Para poder deshacerlo: la fila tal como estaba en el Excel va a fotos/_borradas/estudiantes_quitados.json."""
+    try:
+        papelera.mkdir(parents=True, exist_ok=True)
+        a = papelera / "estudiantes_quitados.json"
+        with _excel_lock:
+            todos = json.loads(a.read_text(encoding="utf-8")) if a.is_file() else []
+            todos.append({"cuando": datetime.now().isoformat(timespec="seconds"), "codigo": codigo,
+                          "fila": fila, "foto_guardada": foto})
+            tmp = a.with_name(f"~tmp_{secrets.token_hex(4)}_{a.name}")
+            tmp.write_text(json.dumps(todos, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+            _reintentar(lambda: os.replace(tmp, a))
+    except Exception:  # noqa: BLE001  (el estudiante ya salió del Excel: esto es solo la copia)
+        log.warning("No se pudo anotar el estudiante quitado %s", codigo, exc_info=True)
 
 
 @app.get("/api/clases/{clase}/estudiantes/{codigo}/selfie")
@@ -1251,6 +1300,30 @@ def buscar_codigo(codigo: str, _u=Usr) -> dict:
             return {"tipo": "lista", "id": ident, "clase_id": clase_id, "nombre": nombre, "codigo": codigo,
                     "creada": datetime.strptime(m["fecha"], "%Y%m%d_%H%M%S").isoformat() if m else None}
     raise HTTPException(404, f"No hay ninguna lista ni clase con el código {codigo}")
+
+
+class PedidoChat(BaseModel):
+    texto: str = Field(min_length=1, max_length=500)
+    nombres: list[str] = Field(default_factory=list, max_length=400)
+
+
+_chat_uso: dict[str, list[float]] = {}
+
+
+@app.post("/api/chat/interpretar")
+async def interpretar_chat(p: PedidoChat, u=Usr) -> dict:
+    """Respaldo del chat: la página lo llama SOLO cuando sus reglas no entendieron la frase.
+    Devuelve una orden (entrar, presente, ausente, quitar, agregar, pasar, ayuda) o ok=false.
+    No toca el reconocimiento ni ningún dato: solo interpreta texto."""
+    if not chat_llm.disponible():
+        return dict(chat_llm.NO_DISPONIBLE)
+    ahora = time.time()
+    usos = [t for t in _chat_uso.get(u["usuario"], []) if t > ahora - 60]
+    if len(usos) >= 30:                        # tope por docente: 30 frases raras por minuto
+        _chat_uso[u["usuario"]] = usos
+        return {"ok": False, "accion": "no", "motivo": "muchas"}
+    _chat_uso[u["usuario"]] = usos + [ahora]
+    return await chat_llm.interprete.interpretar(p.texto, p.nombres)
 
 
 @app.get("/api/asistencias/{archivo}/foto")

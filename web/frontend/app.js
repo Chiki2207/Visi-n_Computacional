@@ -263,28 +263,55 @@ async function entrarDesdeChat(orden) {
   return null;      // el aviso «Entraste a …» lo da la página al abrirse
 }
 
+/** Respaldo del chat: solo cuando las reglas no entendieron. Pide al servidor que lo interprete (Gemini);
+ *  si no hay, tarda o falla, devuelve null y el chat dice «No entendí» como siempre. */
+let respaldoNoHay = false;
+async function interpretarConRespaldo(texto, nombres) {
+  if (respaldoNoHay || !est.token) return null;
+  const ctrl = new AbortController();
+  const reloj = setTimeout(() => ctrl.abort(), 3500);
+  try {
+    const r = await fetch(API + "/api/chat/interpretar", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + est.token, "Content-Type": "application/json" },
+      body: JSON.stringify({ texto, nombres: (nombres || []).slice(0, 400) }),
+      signal: ctrl.signal,
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (j && j.motivo === "no_disponible") respaldoNoHay = true;     // sin clave en el servidor: no se vuelve a preguntar
+    return j;
+  } catch { return null; }
+  finally { clearTimeout(reloj); }
+}
+
 function chatGeneral() {
   if (!window.Asistente || !est.token) return;
   Asistente.alEntrar(entrarDesdeChat);
+  Asistente.alInterpretar(interpretarConRespaldo);
   Asistente.montar({
     personas: async () => [],
     actuar: async (pedido) => {
       if (pedido.accion === "pasar") return "Abre una clase y sube la foto.";
       if (pedido.accion === "presente" || pedido.accion === "ausente") return "Primero abre una lista (dime su código).";
-      if (pedido.accion === "agregar" || pedido.accion === "quitar") return "Abre la clase, pestaña Estudiantes.";
+      if (pedido.accion === "agregar") return "Abre la clase, pestaña Estudiantes.";
+      if (pedido.accion === "quitar") return "¿De qué clase? Ábrela o dime su código.";
       return "Abre una clase o dime el código de una lista.";
     },
   });
   Asistente.alEntrar(entrarDesdeChat);
+  Asistente.alInterpretar(interpretarConRespaldo);
 }
 
 function chatDeClase(c, contenido, pestana) {
   if (!window.Asistente || !est.token) return;
   Asistente.montar();
   Asistente.alEntrar(entrarDesdeChat);
+  Asistente.alInterpretar(interpretarConRespaldo);
   Asistente.contexto({
     personas: () => api(`/api/clases/${enc(c.id)}/estudiantes`).then((al) => al.map((x) => ({ id: x.codigo, nombre: x.nombre }))),
     actuar: (pedido) => actuarEnClase(c, contenido, pestana, pedido),
+    donde: () => nombreDeClase(c.nombre),
   });
 }
 
@@ -301,16 +328,28 @@ async function actuarEnClase(c, contenido, pestana, pedido) {
     return { texto: `Para agregar a ${nombre}, usa Estudiantes › Agregar, con su foto.`, voz: "Agrégalo en Estudiantes, con su foto." };
   }
   if (pedido.accion === "quitar") {
-    if (!pedido.elegidos || !pedido.elegidos.length) return "¿A quién quito?";
-    const quitados = [];
-    for (const p of pedido.elegidos) {
-      await api(`/api/clases/${enc(c.id)}/estudiantes/${enc(p.id)}`, { metodo: "DELETE" });
-      quitados.push(p.nombre);
-    }
+    if (!pedido.elegidos || !pedido.elegidos.length) return "Esta clase no tiene estudiantes.";
+    const r = await eliminarDeClase(c.id, pedido.elegidos);
     if (pestana === "estudiantes") await pestanaEstudiantes(c, contenido);
-    return `Listo. Quité a ${quitados.join(" y ")}.`;
+    return r;
   }
   return "No pude hacerlo.";
+}
+
+/* Desde el chat, SOLO después de que el docente dijo «sí». Misma ruta que el botón «Quitar»:
+   sale del Excel de la clase y su selfie queda guardada aparte (fotos/_borradas). */
+async function eliminarDeClase(claseId, elegidos) {
+  const hechos = [];
+  for (const p of elegidos) {
+    try {
+      await api(`/api/clases/${enc(claseId)}/estudiantes/${enc(p.id)}`, { metodo: "DELETE" });
+      hechos.push(p.nombre);
+    } catch (e) {
+      const antes = hechos.length ? `Eliminé a ${hechos.join(" y ")}, pero ` : "";
+      return `${antes}no pude eliminar a ${p.nombre}: ${e.message || "error"}.`;
+    }
+  }
+  return `Listo. Eliminé a ${hechos.join(" y ")}.`;
 }
 
 /* ------------------------------------------------------------------ rutas */
@@ -932,12 +971,15 @@ function chatDeLista(a, regs, pintar) {
   if (!window.Asistente || !est.token) return;
   Asistente.montar();
   Asistente.alEntrar(entrarDesdeChat);
+  Asistente.alInterpretar(interpretarConRespaldo);
   Asistente.contexto({
     personas: () => regs.map((r) => ({ id: r.codigo, nombre: r.nombre })),
     actuar: async (pedido) => {
       if (pedido.accion === "pasar") return "Esta lista ya está hecha.";
-      if (pedido.accion === "agregar" || pedido.accion === "quitar") {
-        return "Aquí solo marco presentes y ausentes. Para eso ve a la clase › Estudiantes.";
+      if (pedido.accion === "agregar") return "Para agregar ve a la clase › Estudiantes.";
+      if (pedido.accion === "quitar") {
+        if (!pedido.elegidos || !pedido.elegidos.length) return "Esta lista no tiene estudiantes.";
+        return eliminarDeClase(a.clase_id, pedido.elegidos);    // de la clase; esta lista ya hecha no cambia
       }
       if (pedido.accion !== "presente" && pedido.accion !== "ausente") return "No pude hacerlo.";
       const tocados = [];
@@ -954,5 +996,6 @@ function chatDeLista(a, regs, pintar) {
         ? `Listo. ${tocados.join(" y ")} quedaron ${verbo}s.`
         : `Listo. ${tocados[0]} quedó ${verbo}.`;
     },
+    donde: () => nombreDeClase(a.clase || a.clase_id),
   });
 }
