@@ -134,20 +134,52 @@ async function achicarSelfie(file, lado = 1600) {
   } catch { return file; }    // si el navegador no puede abrirla (p. ej. HEIC en Android), se sube tal cual
 }
 
-/** Imagen protegida → URL blob (se recuerda: abrir de nuevo es instantáneo). */
-async function foto(ruta) {
+/** Imagen protegida → URL blob (se recuerda: abrir de nuevo es instantáneo).
+    Se piden de a pocas (FOTOS_A_LA_VEZ) para no ahogar al servidor; las urgentes (la foto del salón)
+    pasan primero en la fila. Si ya se está pidiendo la misma, se espera esa (no se pide dos veces). */
+const FOTOS_A_LA_VEZ = 4;
+const colaFotos = { activas: 0, espera: [] };
+const fotosEnCamino = new Map();
+function turnoFoto(urgente) {
+  return new Promise((listo) => {
+    if (colaFotos.activas < FOTOS_A_LA_VEZ) { colaFotos.activas++; listo(); }
+    else if (urgente) colaFotos.espera.unshift(listo);
+    else colaFotos.espera.push(listo);
+  });
+}
+function soltarFoto() {
+  const sig = colaFotos.espera.shift();
+  if (sig) sig(); else colaFotos.activas--;
+}
+async function foto(ruta, urgente = false) {
   if (est.fotos.has(ruta)) return est.fotos.get(ruta);
-  const r = await api(ruta, { crudo: true });
-  const u = URL.createObjectURL(await r.blob());
-  est.fotos.set(ruta, u);
-  return u;
+  if (fotosEnCamino.has(ruta)) return fotosEnCamino.get(ruta);
+  const p = (async () => {
+    await turnoFoto(urgente);
+    try {
+      const r = await api(ruta, { crudo: true });
+      const u = URL.createObjectURL(await r.blob());
+      est.fotos.set(ruta, u);
+      return u;
+    } finally { soltarFoto(); }
+  })();
+  fotosEnCamino.set(ruta, p);
+  const quitar = () => fotosEnCamino.delete(ruta);
+  p.then(quitar, quitar);
+  return p;
 }
 function olvidarFoto(prefijo) {
   for (const [k, u] of est.fotos) if (k.startsWith(prefijo)) { URL.revokeObjectURL(u); est.fotos.delete(k); }
 }
+/* Las selfies se piden cuando están por verse en pantalla (no las 30 de una vez al abrir la lista). */
+const fotosPorVer = "IntersectionObserver" in window ? new IntersectionObserver((vistas) => {
+  for (const v of vistas) if (v.isIntersecting) { fotosPorVer.unobserve(v.target); v.target._cargar?.(); }
+}, { rootMargin: "300px" }) : null;
 function imgDe(ruta, attrs) {
   const i = el("img", { ...attrs, loading: "lazy" });
-  foto(ruta).then((u) => { i.src = u; }).catch(() => { i.alt = "Sin foto"; });
+  if (est.fotos.has(ruta)) { i.src = est.fotos.get(ruta); return i; }
+  const cargar = () => { i._cargar = null; foto(ruta).then((u) => { i.src = u; }).catch(() => { i.alt = "Sin foto"; }); };
+  if (fotosPorVer) { i._cargar = cargar; fotosPorVer.observe(i); } else cargar();
   return i;
 }
 
@@ -638,7 +670,7 @@ function tarjetaAlumno(c, a, recargar, estados) {
           if (!confirm(`¿Quitar a ${a.nombre} de la clase? (Su foto se guarda aparte por si acaso.)`)) return;
           try { await api(ruta, { metodo: "DELETE" }); toast("Estudiante quitado"); recargar(); } catch (e) { toast(e.message); }
         } }))),
-    a.tiene_selfie ? el("button", { class: "icon-btn", type: "button", title: "Ver foto", "aria-label": `Ver foto de ${a.nombre}`, onclick: () => verFoto(rutaFoto, a.nombre) }, icono("ojo", 22)) : null,
+    a.tiene_selfie ? el("button", { class: "icon-btn", type: "button", title: "Ver foto", "aria-label": `Ver foto de ${a.nombre}`, onclick: () => verFoto(`${rutaFoto}&completa=1`, a.nombre) }, icono("ojo", 22)) : null,
     cambiar);
 }
 
@@ -724,7 +756,10 @@ function mostrarLista(a, volver) {
   const regs = a.registros;
   const selfie = (r) => `/api/clases/${enc(a.clase_id)}/estudiantes/${enc(r.codigo)}/selfie`;
   const img = el("img", { alt: "Foto del salón" });
-  const marco = el("div", { class: "foto-marco" }, img);
+  // Mientras llega la foto, el marco ya ocupa su lugar (con su forma) y dice que está cargando.
+  const marco = el("div", { class: "foto-marco cargando", style: a.ancho && a.alto ? { aspectRatio: `${a.ancho} / ${a.alto}` } : {} }, img);
+  // La foto del salón SIEMPRE completa (original, sin achicar ni recomprimir). Las caras se recortan de ella.
+  const rutaFoto = `/api/asistencias/${enc(a.id)}/foto`;
   const conteo = el("div", { class: "row", style: { gap: "6px" } });
   const zonaAvisos = el("div", { class: "stack" });
   const zonaRevisar = el("div");
@@ -744,14 +779,15 @@ function mostrarLista(a, volver) {
 
   function recorte(bb) {
     const c = el("canvas", { width: 240, height: 240, "aria-label": "Cara en la foto" });
-    const dibujar = () => {
-      const [x1, y1, x2, y2] = bb;
+    const dibujar = (fuente) => {
+      if (!fuente.naturalWidth) return;
+      const [x1, y1, x2, y2] = bb;                                 // píxeles de la foto original (la misma que se ve)
       const lado = Math.max(x2 - x1, y2 - y1) * 1.9, cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
       const g = c.getContext("2d"); g.imageSmoothingQuality = "high";
       g.fillStyle = "#111"; g.fillRect(0, 0, 240, 240);
-      g.drawImage(img, cx - lado / 2, cy - lado / 2, lado, lado, 0, 0, 240, 240);
+      g.drawImage(fuente, cx - lado / 2, cy - lado / 2, lado, lado, 0, 0, 240, 240);
     };
-    if (img.complete && img.naturalWidth) dibujar(); else img.addEventListener("load", dibujar, { once: true });
+    if (img.complete && img.naturalWidth) dibujar(img); else img.addEventListener("load", () => dibujar(img), { once: true });
     return c;
   }
 
@@ -880,9 +916,15 @@ function mostrarLista(a, volver) {
         el("p", { class: "muted xs", style: { margin: 0, textAlign: "center" }, text: "Verde: presente · Amarillo: por revisar · Toque una cara para ver quién es" })),
       zonaRevisar,
       el("section", { class: "glass pad stack fade-in" }, el("h2", { class: "brand h2", text: "Lista" }), zonaFilas))));
+  // La foto del salón se pide PRIMERO (urgente), antes que las selfies de la lista.
+  img.addEventListener("load", () => { marco.classList.remove("cargando"); marco.style.aspectRatio = ""; pintarCajas(); }, { once: true });
+  if (a.tiene_foto === false) {
+    marco.replaceWith(el("p", { class: "msg msg-warn", text: "La foto del salón de esta lista no está guardada en el servidor (la lista sí)." }));
+  } else {
+    foto(rutaFoto, true).then((u) => { img.src = u; })
+      .catch((e) => marco.replaceWith(el("p", { class: "msg msg-warn", text: e.message || "No se pudo cargar la foto del salón." })));
+  }
   pintar();
-  img.addEventListener("load", pintarCajas, { once: true });
-  foto(`/api/asistencias/${enc(a.id)}/foto`).then((u) => { img.src = u; }).catch((e) => marco.replaceWith(errorMsg(e)));
   chatDeLista(a, regs, pintar);
 }
 

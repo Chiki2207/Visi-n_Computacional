@@ -287,8 +287,9 @@
     return [elegidos, null, [], null];
   }
 
+  const SPRITES_V = "2";   // subir este numero cuando cambien las fotos de asistente/ (el navegador las guarda 1 dia)
   function sprite(nombre) {
-    return `/asistente/${nombre}.jpg`;
+    return `/asistente/${nombre}.jpg?v=${SPRITES_V}`;
   }
 
   /* Boca al hablar: hablar_* son la cara en reposo con SOLO la boca cambiada (los ojos y la cara

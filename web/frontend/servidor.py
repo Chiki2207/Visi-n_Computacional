@@ -19,6 +19,7 @@ Arranque:  web\\frontend\\.venv\\Scripts\\python.exe web\\frontend\\servidor.py
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import hmac
 import io
@@ -31,10 +32,11 @@ import shutil
 import sys
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 CARPETA = Path(__file__).resolve().parent          # web/frontend
 WEB = CARPETA.parent                                # web
@@ -82,7 +84,7 @@ CLASES = DATOS / "clases"
 LISTAS = DATOS / "listas"
 USUARIOS = Path(os.environ.get("USUARIOS", "").strip() or WEB / "usuarios.json")
 CODIGOS = Path(os.environ.get("CODIGOS", "").strip() or DATOS / "codigos_listas.json")
-MAX_MB = float(os.environ.get("MAX_MB", "25"))
+MAX_MB = float(os.environ.get("MAX_MB", "40"))       # igual que IA_MAX_MB del servicio de IA (más no le llegaría)
 SESION_HORAS = float(os.environ.get("SESION_HORAS", "12"))
 EXTENSIONES = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".bmp", ".tif", ".tiff"}
 RE_LISTA = re.compile(r"^lista_(?P<clase>.+)_(?P<fecha>\d{8}_\d{6})\.xlsx$")
@@ -382,18 +384,48 @@ async def _leer_subida(f: UploadFile) -> tuple[bytes, str]:
     return datos, ext
 
 
+_cache_jpeg: OrderedDict = OrderedDict()   # (foto, fecha, tamaño, lado) → miniatura lista (solo en memoria)
+_cache_jpeg_lock = threading.Lock()
+_cache_jpeg_bytes = 0
+CACHE_FOTOS_MB = float(os.environ.get("CACHE_FOTOS_MB", "96"))
+
+
 def _jpeg(ruta: Path, lado: int | None = None) -> Response:
-    """Foto derecha (giro EXIF, igual que la IA) en JPEG para el navegador (también HEIC)."""
+    """Foto derecha (giro EXIF, igual que la IA) en JPEG para el navegador (también HEIC).
+    La versión ya convertida se recuerda en memoria: abrir otra vez la lista o las selfies es instantáneo.
+    El archivo original no se modifica; si cambia (otra fecha o tamaño), se convierte de nuevo."""
+    global _cache_jpeg_bytes
     try:
-        with Image.open(io.BytesIO(_reintentar(ruta.read_bytes))) as im:      # el archivo se suelta enseguida
-            im = ImageOps.exif_transpose(im).convert("RGB")
-            if lado:
-                im.thumbnail((lado, lado), Image.Resampling.LANCZOS)
-            buf = io.BytesIO()
-            im.save(buf, "JPEG", quality=88)
-    except (OSError, ValueError) as ex:
+        st = ruta.stat()
+    except OSError as ex:
         raise HTTPException(404, "No se pudo abrir la foto") from ex
-    return Response(buf.getvalue(), media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
+    clave = (str(ruta), st.st_mtime_ns, st.st_size, lado)
+    with _cache_jpeg_lock:
+        datos = _cache_jpeg.get(clave)
+        if datos is not None:
+            _cache_jpeg.move_to_end(clave)
+    if datos is None:
+        try:
+            with Image.open(io.BytesIO(_reintentar(ruta.read_bytes))) as im:      # el archivo se suelta enseguida
+                if lado:
+                    im.draft("RGB", (lado, lado))       # JPEG: decodifica ya reducida (mucho más rápido)
+                im = ImageOps.exif_transpose(im).convert("RGB")
+                if lado:
+                    im.thumbnail((lado, lado), Image.Resampling.LANCZOS)
+                buf = io.BytesIO()
+                im.save(buf, "JPEG", quality=88)
+        except (OSError, ValueError) as ex:
+            raise HTTPException(404, "No se pudo abrir la foto") from ex
+        datos = buf.getvalue()
+        if len(datos) > CACHE_FOTOS_MB * 1024 * 1024 / 4:      # muy grande: se entrega igual, solo no se guarda
+            return Response(datos, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
+        with _cache_jpeg_lock:
+            if clave not in _cache_jpeg:
+                _cache_jpeg[clave] = datos
+                _cache_jpeg_bytes += len(datos)
+            while _cache_jpeg and _cache_jpeg_bytes > CACHE_FOTOS_MB * 1024 * 1024:
+                _cache_jpeg_bytes -= len(_cache_jpeg.popitem(last=False)[1])
+    return Response(datos, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
 
 
 # ====================================================================== aplicación
@@ -508,7 +540,8 @@ def _asistente_sprite(archivo: str):
     ruta = (CARPETA / "asistente" / archivo).resolve()
     if ruta.parent != (CARPETA / "asistente").resolve() or not ruta.is_file():
         raise HTTPException(404)
-    return FileResponse(ruta, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
+    # Se guardan 1 dia en el navegador; asistente.js pide ?v=N y al cambiar las caras se sube N.
+    return FileResponse(ruta, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/marca/{archivo}", include_in_schema=False)
@@ -825,12 +858,51 @@ def borrar_estudiante(clase: str, codigo: str, _u=Usr) -> dict:
 
 
 @app.get("/api/clases/{clase}/estudiantes/{codigo}/selfie")
-def selfie(clase: str, codigo: str, _u=Usr):
+def selfie(clase: str, codigo: str, completa: bool = False, _u=Usr):
+    """Miniatura (480 px) para las tarjetas pequeñas; con ?completa=1 la foto original tal cual."""
     c = _carpeta_clase(clase)
-    e = next((a for a in _alumnos(c) if a.id == codigo), None)
-    if e is None or not e.ruta_imagen.is_file():
+    ruta = _ruta_selfie(c, codigo)
+    if ruta is None or not ruta.is_file():
         raise HTTPException(404, "Sin selfie")
-    return _jpeg(e.ruta_imagen, 480)
+    return _original(ruta) if completa else _jpeg(ruta, 480)
+
+
+_TIPOS_NAVEGADOR = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+
+
+def _original(ruta: Path):
+    """La foto ORIGINAL, sin achicar ni recomprimir: los mismos bytes del archivo (el navegador la gira
+    según su EXIF, igual que la IA). Si el navegador no sabe abrir ese formato (HEIC, TIFF, BMP) se convierte
+    a PNG, que no pierde calidad, a su resolución completa."""
+    tipo = _TIPOS_NAVEGADOR.get(ruta.suffix.lower())
+    if tipo:
+        return FileResponse(ruta, media_type=tipo, headers={"Cache-Control": "private, max-age=300"})
+    try:
+        with Image.open(io.BytesIO(_reintentar(ruta.read_bytes))) as im:
+            im = ImageOps.exif_transpose(im)
+            if im.mode not in ("RGB", "RGBA", "L"):
+                im = im.convert("RGB")
+            buf = io.BytesIO()
+            im.save(buf, "PNG", compress_level=1)
+    except (OSError, ValueError) as ex:
+        raise HTTPException(404, "No se pudo abrir la foto") from ex
+    return Response(buf.getvalue(), media_type="image/png", headers={"Cache-Control": "private, max-age=300"})
+
+
+_cache_selfies: dict[str, tuple] = {}
+
+
+def _ruta_selfie(c: Path, codigo: str) -> Path | None:
+    """Ruta de la selfie de un alumno. El Excel de la clase se lee una vez y se recuerda hasta que cambie
+    (antes se leía entero por CADA selfie: una lista de 30 alumnos = 30 lecturas del Excel)."""
+    x = c / "estudiantes.xlsx"
+    st = x.stat()
+    clave = (st.st_mtime_ns, st.st_size)
+    m = _cache_selfies.get(str(x))
+    if m is None or m[0] != clave:
+        m = (clave, {a.id: a.ruta_imagen for a in _alumnos(c)})
+        _cache_selfies[str(x)] = m
+    return m[1].get(codigo)
 
 
 # ---------------------------------------------------------------------- pasar lista
@@ -964,7 +1036,29 @@ def _hoja(wb, nombre) -> list:
     return list(wb[nombre].iter_rows(values_only=True)) if nombre in wb.sheetnames else []
 
 
+_cache_listas: OrderedDict = OrderedDict()   # (lista, fecha, tamaño) → lista ya leída
+_cache_listas_lock = threading.Lock()
+
+
 def _leer_lista(archivo: str) -> dict:
+    """La lista leída del Excel; se recuerda hasta que el archivo cambie (fecha o tamaño)."""
+    p = _ruta_lista(archivo)
+    st = p.stat()
+    clave = (archivo, st.st_mtime_ns, st.st_size)
+    with _cache_listas_lock:
+        d = _cache_listas.get(clave)
+    if d is None:
+        d = _leer_lista_excel(archivo)
+        with _cache_listas_lock:
+            for k in [k for k in _cache_listas if k[0] == archivo]:
+                del _cache_listas[k]
+            _cache_listas[clave] = d
+            while len(_cache_listas) > 200:
+                _cache_listas.popitem(last=False)
+    return copy.deepcopy(d)
+
+
+def _leer_lista_excel(archivo: str) -> dict:
     p = _ruta_lista(archivo)
     wb = _abrir_excel(p, read_only=True, data_only=True)
     lista, meta, dets = _hoja(wb, "lista"), dict(r[:2] for r in _hoja(wb, "meta")[1:]), _hoja(wb, "detecciones")
@@ -1010,6 +1104,82 @@ def _leer_lista(archivo: str) -> dict:
     }
 
 
+def _en_datos(p: Path) -> Path | None:
+    try:
+        p = p.resolve()
+    except (OSError, ValueError):
+        return None
+    return p if DATOS in p.parents and p.is_file() else None
+
+
+def _buscar_foto(f: str, clase_id: str) -> Path | None:
+    """Dónde está la foto del salón de una lista. La web guarda la ruta relativa a datos/; el programa del
+    computador guarda la ruta completa de ESE computador (p. ej. D:\\...\\datos\\clases\\...). Solo se
+    aceptan fotos dentro de datos/."""
+    es_win = "\\" in f or bool(re.match(r"^[A-Za-z]:", f))
+    pp = PureWindowsPath(f) if es_win else Path(f)
+    if not es_win or os.name == "nt":                     # 1) tal cual
+        p = Path(f)
+        r = _en_datos(p if p.is_absolute() else DATOS / p)
+        if r:
+            return r
+    partes = list(pp.parts)
+    bajas = [x.lower() for x in partes]
+    if "datos" in bajas:                                   # 2) lo que sigue a «datos» en el otro computador
+        i = len(bajas) - 1 - bajas[::-1].index("datos")
+        if partes[i + 1:]:
+            r = _en_datos(DATOS.joinpath(*partes[i + 1:]))
+            if r:
+                return r
+    nombre = pp.name                                       # 3) el mismo archivo en la carpeta de la clase (si es uno solo)
+    c = CLASES / clase_id
+    if nombre and "/" not in clase_id and "\\" not in clase_id and c.parent == CLASES and c.is_dir():
+        grupales = c / "fotos_grupales"
+        hallados = [x for x in grupales.rglob("*") if x.name == nombre and x.is_file()
+                    and not any(s.startswith("_") for s in x.relative_to(grupales).parts)] if grupales.is_dir() else []
+        if not hallados and (c / nombre).is_file():
+            hallados = [c / nombre]
+        if len(hallados) == 1:
+            return _en_datos(hallados[0])
+    return None
+
+
+_cache_fotos_lista: dict[tuple, Path | None] = {}
+
+
+def _foto_de_lista(d: dict) -> Path | None:
+    f = str(d.get("foto") or "").strip()
+    if not f:
+        return None
+    clave = (d["id"], f)
+    p = _cache_fotos_lista.get(clave)
+    if p is not None and p.is_file():
+        return p
+    p = _buscar_foto(f, d["clase_id"])
+    if p is not None:
+        _cache_fotos_lista[clave] = p
+    return p
+
+
+_cache_medidas: dict[tuple, tuple[int, int]] = {}
+
+
+def _medidas(p: Path) -> tuple[int, int] | None:
+    """Ancho y alto de la foto ya derecha (giro EXIF), sin decodificarla entera."""
+    st = p.stat()
+    clave = (str(p), st.st_mtime_ns, st.st_size)
+    if clave not in _cache_medidas:
+        try:
+            with Image.open(p) as im:
+                w, h = im.size
+                if im.getexif().get(0x0112, 1) in (5, 6, 7, 8):
+                    w, h = h, w
+        except (OSError, ValueError):
+            return None
+        _cache_medidas[clave] = (w, h)
+    return _cache_medidas[clave]
+
+
 def _resumen_trabajo(archivo: str, t: dict) -> dict:
     return {"id": archivo, "clase_id": t["clase"], "clase": t["clase"], "estado": t["estado"], "error": t.get("error"),
             "creada": t["creada"], "nombre_archivo": t["nombre_archivo"], "registros": [], "detecciones": [],
@@ -1042,6 +1212,13 @@ def asistencia(archivo: str, _u=Usr) -> dict:
         d = _leer_lista(archivo)
     d["clase"] = _nombre_visible(CLASES / d["clase_id"]) if (CLASES / d["clase_id"]).is_dir() else d["clase_id"]
     d["codigo"] = _codigo(f"lista:{archivo}")
+    if archivo not in _trabajos:
+        p = _foto_de_lista(d)
+        d["tiene_foto"] = p is not None
+        if p is not None and not d.get("ancho"):           # listas del programa del computador
+            m = _medidas(p)
+            if m:
+                d["ancho"], d["alto"] = m
     return d
 
 
@@ -1078,14 +1255,14 @@ def buscar_codigo(codigo: str, _u=Usr) -> dict:
 
 @app.get("/api/asistencias/{archivo}/foto")
 def foto_asistencia(archivo: str, _u=Usr):
+    """La foto del salón ORIGINAL, a resolución completa y sin recomprimir (sin ningún límite de tamaño)."""
     d = _leer_lista(archivo)
     if not d["foto"]:
         raise HTTPException(404, "La lista no dice qué foto usó")
-    p = Path(d["foto"])
-    p = (p if p.is_absolute() else DATOS / p).resolve()      # web: relativa a datos/; ventana: absoluta
-    if DATOS not in p.parents or not p.is_file():     # solo fotos dentro de datos/
-        raise HTTPException(404, "La foto de esta lista no está disponible")
-    return _jpeg(p)
+    p = _foto_de_lista(d)                              # solo fotos dentro de datos/
+    if p is None:
+        raise HTTPException(404, "La foto de esta lista no está guardada en el servidor")
+    return _original(p)
 
 
 class CambioEstado(BaseModel):

@@ -171,6 +171,11 @@ a { color: var(--accent); }
 /* ------------------------------------------------------------------ resultado de una lista */
 .foto-marco { position: relative; line-height: 0; border-radius: 16px; overflow: hidden; background: #111; }
 .foto-marco img { width: 100%; height: auto; }
+.foto-marco.cargando { min-height: 160px; }
+.foto-marco.cargando::after {
+  content: "Cargando foto del salón…"; position: absolute; inset: 0; display: grid; place-items: center;
+  color: #cfd8d3; font-size: 0.9rem; font-weight: 600; line-height: 1.2;
+}
 .caja { position: absolute; border: 2px solid rgba(255, 255, 255, 0.6); border-radius: 4px; padding: 0; background: none; cursor: pointer; }
 .caja-presente { border-color: #2fd37f; }
 .caja-revisar { border-color: #f5b52e; border-style: dashed; }
