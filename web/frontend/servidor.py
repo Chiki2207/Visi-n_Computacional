@@ -503,7 +503,7 @@ _MARCA = {"logouniamazonia.webp": "image/webp", "logouniamazonia-sm.webp": "imag
 @app.get("/asistente/{archivo}", include_in_schema=False)
 def _asistente_sprite(archivo: str):
     """Sprites del asistente en la página. No son parte del reconocimiento de lista."""
-    if not re.fullmatch(r"(reposo|boca_[aeioum]|ojos_(centro|izq|der|arriba|abajo|blink|arriba_izq|arriba_der|abajo_izq|abajo_der))\.jpg", archivo):
+    if not re.fullmatch(r"(reposo|boca_[aeioum]|hablar_[aeiou]|ojos_(centro|izq|der|arriba|abajo|blink|arriba_izq|arriba_der|abajo_izq|abajo_der))\.jpg", archivo):
         raise HTTPException(404)
     ruta = (CARPETA / "asistente" / archivo).resolve()
     if ruta.parent != (CARPETA / "asistente").resolve() or not ruta.is_file():

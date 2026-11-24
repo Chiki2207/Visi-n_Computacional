@@ -162,7 +162,7 @@ function salirLocal() {
 
 /* ------------------------------------------------------------------ chat: entrar a una lista */
 function chipCodigo(codigo) {
-  return codigo ? el("span", { class: "chip chip-codigo", title: "Escríbalo en el chat para entrar aquí", text: `Código ${codigo}` }) : null;
+  return codigo ? el("span", { class: "chip chip-codigo", title: "Escríbelo en el chat para entrar aquí", text: `Código ${codigo}` }) : null;
 }
 
 /** El chat queda con esta clase o lista como contexto y avisa «Entraste a …» (una vez por lugar). */
@@ -179,8 +179,15 @@ function salirDeLugar() {
   if (window.Asistente) Asistente.lugar("");
 }
 
-function textoLista(a) {
-  return `la lista de ${a.clase || a.nombre || "la clase"}${a.creada ? ` del ${fechaLarga(a.creada)}` : ""}`;
+/** «Clase computacional2» tal cual; «Cálculo» → «Clase Cálculo» (nunca «Clase Clase …»). */
+function nombreDeClase(nombre) {
+  const n = String(nombre || "").trim();
+  return /^clase/.test(window.Asistente ? Asistente.normalizar(n) : n.toLowerCase()) ? n : `Clase ${n}`;
+}
+
+/** Nombre corto para el chat: «Lista 2746» o, sin código, «Lista de Cálculo». */
+function nombreDeLista(a) {
+  return a.codigo ? `Lista ${a.codigo}` : `Lista de ${a.clase || a.nombre || "la clase"}`;
 }
 
 /** «entra a la lista 4821» / «4821» / «abre la clase Computación 2»: lleva a esa clase o lista. */
@@ -190,12 +197,12 @@ async function entrarDesdeChat(orden) {
     try { destino = await api(`/api/codigos/${enc(orden.codigo)}`); }
     catch (e) {
       const resto = Asistente.normalizar(orden.nombre).replace(orden.codigo, "").trim();
-      if (!resto) return `No encontré ninguna lista ni clase con el código ${orden.codigo}. Revise el número que aparece junto a cada lista.`;
+      if (!resto) return `No hay lista ni clase con el código ${orden.codigo}.`;
     }
   }
   if (!destino) {
     const q = Asistente.normalizar(orden.nombre);
-    if (!q) return "Dime el código de 4 números de la lista, o el nombre de la clase.";
+    if (!q) return "Dime el código de 4 números.";
     const clases = await api("/api/clases");
     const palabras = q.split(" ").filter(Boolean);
     const exactas = clases.filter((c) => Asistente.normalizar(c.nombre) === q || Asistente.normalizar(c.id) === q);
@@ -203,19 +210,22 @@ async function entrarDesdeChat(orden) {
       const p = Asistente.normalizar(c.nombre).split(" ");
       return palabras.every((w) => p.some((x) => x.startsWith(w)));
     });
-    if (!parecidas.length) return `No encontré una clase o lista llamada «${orden.nombre}». Dime su código de 4 números.`;
+    if (!parecidas.length) return `No encontré «${orden.nombre}». Dime el código.`;
     if (parecidas.length > 1) {
-      return `Hay ${parecidas.length} clases con ese nombre: ${parecidas.slice(0, 6).map((c) => `${c.nombre} (código ${c.codigo})`).join("; ")}. Dime el código.`;
+      return {
+        texto: `¿Cuál? ${parecidas.slice(0, 6).map((c) => `${c.nombre} (${c.codigo})`).join(", ")}. Dime el código.`,
+        voz: `Hay ${parecidas.length} clases así. Dime el código.`,
+      };
     }
     const c = parecidas[0];
     destino = { tipo: "clase", id: c.id, clase_id: c.id, nombre: c.nombre, codigo: c.codigo };
   }
   const ruta = destino.tipo === "clase" ? `#/clase/${enc(destino.id)}/lista` : `#/lista/${enc(destino.id)}`;
   const clave = `${destino.tipo}:${destino.id}`;
-  const etiqueta = destino.tipo === "clase" ? `la clase ${destino.nombre}` : textoLista({ clase: destino.nombre, creada: destino.creada });
   if (est.lugar === clave) {
     if (location.hash !== ruta) irA(ruta);
-    return `Ya estás en ${etiqueta} (código ${destino.codigo}).`;
+    const aqui = destino.tipo === "clase" ? nombreDeClase(destino.nombre) : `la lista ${destino.codigo}`;
+    return `Ya estás en ${aqui}.`;
   }
   irA(ruta);
   return null;      // el aviso «Entraste a …» lo da la página al abrirse
@@ -227,10 +237,10 @@ function chatGeneral() {
   Asistente.montar({
     personas: async () => [],
     actuar: async (pedido) => {
-      if (pedido.accion === "pasar") return "Abra una clase y use «Pasar lista» con la foto del salón. El reconocimiento lo hace el sistema de siempre.";
-      if (pedido.accion === "presente" || pedido.accion === "ausente") return "Eso se hace dentro de una lista ya hecha. Ábrala en Historial.";
-      if (pedido.accion === "agregar" || pedido.accion === "quitar") return "Para agregar o quitar estudiantes entre a una clase, pestaña Estudiantes.";
-      return "Abra una clase o una lista para que yo pueda ayudarle ahí. También puede decirme su código: entra a la lista 4821.";
+      if (pedido.accion === "pasar") return "Abre una clase y sube la foto.";
+      if (pedido.accion === "presente" || pedido.accion === "ausente") return "Primero abre una lista (dime su código).";
+      if (pedido.accion === "agregar" || pedido.accion === "quitar") return "Abre la clase, pestaña Estudiantes.";
+      return "Abre una clase o dime el código de una lista.";
     },
   });
   Asistente.alEntrar(entrarDesdeChat);
@@ -249,24 +259,24 @@ function chatDeClase(c, contenido, pestana) {
 async function actuarEnClase(c, contenido, pestana, pedido) {
   if (pedido.accion === "pasar") {
     if (pestana !== "lista") irA(`#/clase/${enc(c.id)}/lista`);
-    return "Para pasar lista tome la foto del salón en «Pasar lista». El reconocimiento lo hace el sistema de siempre.";
+    return "Sube la foto del salón.";
   }
   if (pedido.accion === "presente" || pedido.accion === "ausente") {
-    return "Eso se hace cuando ya hay una lista. Ábrala en Historial, o pase lista con la foto del salón.";
+    return "Primero pasa lista o abre una en Historial.";
   }
   if (pedido.accion === "agregar") {
     const nombre = String(pedido.nombre || "").split(" ").filter(Boolean).map((p) => p[0].toUpperCase() + p.slice(1)).join(" ");
-    return "Para agregar a " + nombre + ", use la pestaña Estudiantes y el botón de agregar con su foto. Así queda igual que siempre.";
+    return { texto: `Para agregar a ${nombre}, usa Estudiantes › Agregar, con su foto.`, voz: "Agrégalo en Estudiantes, con su foto." };
   }
   if (pedido.accion === "quitar") {
-    if (!pedido.elegidos || !pedido.elegidos.length) return "Dime a quién quitar de la clase.";
+    if (!pedido.elegidos || !pedido.elegidos.length) return "¿A quién quito?";
     const quitados = [];
     for (const p of pedido.elegidos) {
       await api(`/api/clases/${enc(c.id)}/estudiantes/${enc(p.id)}`, { metodo: "DELETE" });
-      quitados.push(`${p.nombre} (${p.id})`);
+      quitados.push(p.nombre);
     }
     if (pestana === "estudiantes") await pestanaEstudiantes(c, contenido);
-    return `Listo. Quité a ${quitados.join(" y ")} de la clase. La foto queda guardada aparte.`;
+    return `Listo. Quité a ${quitados.join(" y ")}.`;
   }
   return "No pude hacerlo.";
 }
@@ -496,10 +506,13 @@ async function vistaClase(id, pestana) {
   else if (pestana === "estudiantes") await pestanaEstudiantes(c, contenido);
   else await pestanaHistorial(c, contenido);
   chatDeClase(c, contenido, pestana);
-  const hacer = pestana === "lista" ? "Sube la foto del salón para pasar lista."
-    : pestana === "estudiantes" ? "Aquí puedes registrar o quitar estudiantes." : "Aquí están sus listas pasadas, cada una con su código.";
-  anunciarLugar(`clase:${c.id}`, c.codigo ? `Clase ${c.codigo} · ${c.nombre}` : c.nombre,
-    `Entraste a la clase ${c.nombre}${c.codigo ? ` (código ${c.codigo})` : ""}. ${hacer}`);
+  const hacer = pestana === "lista" ? ["Sube la foto del salón.", "Sube la foto."]
+    : pestana === "estudiantes" ? ["Agrega o quita estudiantes.", "Agrega o quita estudiantes."] : ["Elige una lista.", "Elige una lista."];
+  const nombreC = nombreDeClase(c.nombre);
+  anunciarLugar(`clase:${c.id}`, c.codigo ? `Clase ${c.codigo} · ${c.nombre}` : c.nombre, {
+    texto: `${nombreC}${c.codigo ? ` (${c.codigo})` : ""}. ${hacer[0]}`,
+    voz: `${nombreC}. ${hacer[1]}`,
+  });
 }
 
 function pestanaPasar(c, cont) {
@@ -657,10 +670,11 @@ async function vistaLista(id) {
   const a = await api(`/api/asistencias/${enc(id)}`);
   const volver = el("a", { class: "back", href: `#/clase/${enc(a.clase_id)}/lista`, text: `← ${a.clase}` });
   const etiqueta = a.codigo ? `Lista ${a.codigo} · ${a.clase}` : `Lista de ${a.clase}`;
-  const entraste = `Entraste a ${textoLista(a)}${a.codigo ? ` (código ${a.codigo})` : ""}.`;
+  const titulo = nombreDeLista(a);
+  const cuando = a.creada ? ` · ${fechaCorta(a.creada)}` : "";
   if (a.estado === "procesando") {
     esperar(a, volver);
-    anunciarLugar(`lista:${a.id}`, etiqueta, `${entraste} Estoy reconociendo las caras, ya casi.`);
+    anunciarLugar(`lista:${a.id}`, etiqueta, { texto: `${titulo}${cuando}: reconociendo caras…`, voz: `${titulo}: reconociendo caras.` });
     return;
   }
   if (a.estado === "error") {
@@ -670,12 +684,12 @@ async function vistaLista(id) {
           el("a", { class: "btn btn-primary", href: `#/clase/${enc(a.clase_id)}/lista`, text: "Intentar con otra foto" }),
           el("button", { class: "btn btn-danger", type: "button", text: "Descartar", onclick: () => borrarLista(a) }))))));
     chatGeneral();
-    anunciarLugar(`lista:${a.id}`, etiqueta, `${entraste} Esta no se pudo pasar: intente con otra foto.`);
+    anunciarLugar(`lista:${a.id}`, etiqueta, { texto: `${titulo}${cuando}: falló. Prueba otra foto.`, voz: `${titulo}: falló. Prueba otra foto.` });
     return;
   }
   mostrarLista(a, volver);
-  const cuenta = `${a.presentes} presentes${a.por_revisar ? `, ${a.por_revisar} por revisar` : ""} y ${a.ausentes} ausentes`;
-  anunciarLugar(`lista:${a.id}`, etiqueta, `${entraste} Tiene ${cuenta}. Puedes decirme: pon a Ana como presente.`);
+  const cuenta = `${a.presentes} presentes, ${a.ausentes} ausentes${a.por_revisar ? `, ${a.por_revisar} por revisar` : ""}`;
+  anunciarLugar(`lista:${a.id}`, etiqueta, { texto: `${titulo}${cuando}: ${cuenta}.`, voz: `${titulo}: ${cuenta}.` });
 }
 
 function esperar(a, volver) {
@@ -879,9 +893,9 @@ function chatDeLista(a, regs, pintar) {
   Asistente.contexto({
     personas: () => regs.map((r) => ({ id: r.codigo, nombre: r.nombre })),
     actuar: async (pedido) => {
-      if (pedido.accion === "pasar") return "Esta lista ya fue realizada. Puede decir: pon a Ana como presente.";
+      if (pedido.accion === "pasar") return "Esta lista ya está hecha.";
       if (pedido.accion === "agregar" || pedido.accion === "quitar") {
-        return "Para agregar o quitar un estudiante vuelva a la clase, pestaña Estudiantes. Aquí solo cambio presentes y ausentes.";
+        return "Aquí solo marco presentes y ausentes. Para eso ve a la clase › Estudiantes.";
       }
       if (pedido.accion !== "presente" && pedido.accion !== "ausente") return "No pude hacerlo.";
       const tocados = [];
@@ -890,7 +904,7 @@ function chatDeLista(a, regs, pintar) {
         if (!r) return `No encontré a ${p.nombre} en esta lista.`;
         const nuevo = await api(`/api/asistencias/${enc(a.id)}/registros/${enc(r.codigo)}`, { metodo: "PATCH", json: { estado: pedido.accion } });
         Object.assign(r, nuevo);
-        tocados.push(`${r.nombre} (${r.codigo})`);
+        tocados.push(r.nombre);
       }
       pintar();
       const verbo = pedido.accion === "presente" ? "presente" : "ausente";

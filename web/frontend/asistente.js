@@ -9,7 +9,10 @@
 (function (raiz) {
   "use strict";
 
-  const AYUDA = "Puedo pasar la lista, poner presente, quitar un presente, agregar un estudiante o quitarlo de la clase. Por ejemplo: pon a Ana como presente. También te llevo a una lista con su código de 4 números: entra a la lista 4821.";
+  const AYUDA = {
+    texto: "Puedo marcar presente o ausente, quitar estudiantes y abrir una lista por su código (ej.: 4821).",
+    voz: "Puedo marcar presentes y ausentes, y abrir listas por código.",
+  };
 
   function normalizar(texto) {
     return String(texto || "").trim().toLowerCase()
@@ -50,7 +53,7 @@
     r = r.replace(/^(?:de la|del|de|con el|con)\s+/, "");
     const mt2 = r.match(/^(?:clase|curso|grupo|materia)\b\s*/);
     if (mt2) { tipo = tipo || "clase"; r = r.slice(mt2[0].length); }
-    const mc = r.match(/^(?:codigo|numero|num|no|#)\s*/);
+    const mc = r.match(/^(?:codigo|numero|num|#)\s*|^no\s*(?=\d)/);     // «no 4821» sí; un «no» solo, no
     if (mc) { conCodigo = true; r = r.slice(mc[0].length); }
     r = r.replace(/\s+por favor$/, "").trim();
     if (!conVerbo && !tipo && !conCodigo) return null;
@@ -105,11 +108,119 @@
     return m ? Number(m[1]) : null;
   }
 
-  function textoOpciones(candidatos) {
-    const mostrados = candidatos.slice(0, 8);
-    let lista = mostrados.map((p) => `${p.nombre} (${p.id})`).join("; ");
-    if (candidatos.length > mostrados.length) lista += `; y ${candidatos.length - mostrados.length} más`;
-    return lista;
+  /* ---------- Nombres mal oídos («araña» por «avendaño»): parecido por palabra.
+     Se compara palabra por palabra (sin tildes, ñ = n) con Jaro-Winkler y una versión «como suena»
+     (v = b, z = s, ll = y, sin h…). Solo se aplica solo si hay UN estudiante claramente mejor. */
+  const VACIAS = new Set(["de", "del", "la", "las", "los", "el", "y", "e", "a", "al", "da", "do"]);
+
+  function palabrasDe(texto) {
+    return normalizar(texto).split(" ").filter((w) => w && !VACIAS.has(w));
+  }
+
+  function comoSuena(w) {
+    return w.replace(/h/g, "").replace(/ll/g, "y").replace(/v/g, "b").replace(/z/g, "s")
+      .replace(/c([ei])/g, "s$1").replace(/qu/g, "k").replace(/c/g, "k").replace(/g([ei])/g, "j$1")
+      .replace(/x/g, "ks").replace(/w/g, "u").replace(/(.)\1+/g, "$1");
+  }
+
+  function jaroWinkler(a, b) {
+    if (a === b) return 1;
+    const la = a.length, lb = b.length;
+    if (!la || !lb) return 0;
+    const rango = Math.max(0, Math.floor(Math.max(la, lb) / 2) - 1);
+    const ma = new Array(la).fill(false), mb = new Array(lb).fill(false);
+    let m = 0;
+    for (let i = 0; i < la; i++) {
+      for (let j = Math.max(0, i - rango); j < Math.min(lb, i + rango + 1); j++) {
+        if (!mb[j] && a[i] === b[j]) { ma[i] = mb[j] = true; m++; break; }
+      }
+    }
+    if (!m) return 0;
+    let t = 0, k = 0;
+    for (let i = 0; i < la; i++) {
+      if (!ma[i]) continue;
+      while (!mb[k]) k++;
+      if (a[i] !== b[k]) t++;
+      k++;
+    }
+    const jaro = (m / la + m / lb + (m - t / 2) / m) / 3;
+    let pre = 0;
+    while (pre < 4 && a[pre] === b[pre]) pre++;
+    return jaro + pre * 0.1 * (1 - jaro);
+  }
+
+  function parecidoPalabra(q, w) {
+    if (q === w) return 1;
+    if (comoSuena(q) === comoSuena(w)) return 0.96;
+    if (q.length >= 4 && w.startsWith(q)) return 0.92;          // «avend» → «avendano»
+    return Math.max(jaroWinkler(q, w), jaroWinkler(comoSuena(q), comoSuena(w)) - 0.02);
+  }
+
+  /* Qué tanto se parece lo dicho al nombre: cada palabra dicha busca su mejor pareja (sin repetir). */
+  function puntaje(qs, persona) {
+    const ws = palabrasDe(persona.nombre);
+    const usadas = new Set();
+    let suma = 0, fuertes = 0, flojas = 0, peor = 1;
+    for (const q of qs) {
+      let mejor = 0, cual = -1;
+      ws.forEach((w, i) => {
+        if (usadas.has(i)) return;
+        const v = parecidoPalabra(q, w);
+        if (v > mejor) { mejor = v; cual = i; }
+      });
+      if (cual >= 0) usadas.add(cual);
+      suma += mejor;
+      if (mejor >= 0.88) fuertes++;
+      else flojas++;
+      peor = Math.min(peor, mejor);
+    }
+    return { persona, puntaje: qs.length ? suma / qs.length : 0, fuertes, flojas, peor };
+  }
+
+  /* Devuelve { seguro: [persona] } si hay uno claro, { dudas: [...] } si hay que preguntar, o {}. */
+  function aproximados(pedido, personas) {
+    const qs = palabrasDe(pedido).filter((w) => numeroId(w) === null);
+    if (!qs.length) return {};
+    const todos = personas.map((p) => puntaje(qs, p)).sort((x, y) => y.puntaje - x.puntaje);
+    // «alto»: todo coincide, o falla UNA palabra (algo parecida) y al menos dos coinciden bien
+    const alto = (r) => r.puntaje >= 0.8 && (r.flojas === 0 || (r.flojas === 1 && r.fuertes >= 2 && r.peor >= 0.5));
+    // se aplica solo si la palabra fallada está rodeada de 3 que sí coinciden (o se parece bastante)
+    const firme = (r) => r.flojas === 0 || r.fuertes >= 3 || r.peor >= 0.7;
+    const altos = todos.filter(alto);
+    if (altos.length === 1) {
+      const otro = todos.find((r) => r !== altos[0]);
+      if (!otro || altos[0].puntaje - otro.puntaje >= 0.08) {
+        return firme(altos[0]) ? { seguro: [altos[0].persona] } : { dudas: [altos[0].persona] };
+      }
+    }
+    if (altos.length > 1) {
+      const tope = altos[0].puntaje;
+      return { dudas: altos.filter((r) => tope - r.puntaje < 0.08).slice(0, 5).map((r) => r.persona) };
+    }
+    const dudas = todos.filter((r) => r.puntaje >= 0.72 && r.fuertes >= 1).slice(0, 3).map((r) => r.persona);
+    return dudas.length ? { dudas } : {};
+  }
+
+  /* «¿Cuál? 1) … 2) …» (texto) y algo corto para la voz. */
+  function preguntaCual(opciones) {
+    if (opciones.length === 1) {
+      return { texto: `¿Es ${opciones[0].nombre}? (sí / no)`, voz: `¿Es ${opciones[0].nombre}?` };
+    }
+    const mostradas = opciones.slice(0, 8);
+    const texto = "¿Cuál? " + mostradas.map((p, i) => `${i + 1}) ${p.nombre}`).join("  ")
+      + (opciones.length > mostradas.length ? `  y ${opciones.length - mostradas.length} más` : "");
+    const voz = opciones.length <= 3
+      ? "¿Cuál? " + opciones.map((p, i) => `${i + 1}, ${p.nombre}`).join(". ") + "."
+      : `¿Cuál? Hay ${opciones.length}. Dime el número.`;
+    return { texto, voz };
+  }
+
+  const NUMEROS = { uno: 1, una: 1, primero: 1, primera: 1, dos: 2, segundo: 2, segunda: 2, tres: 3, tercero: 3,
+    tercera: 3, cuatro: 4, cuarto: 4, cuarta: 4, cinco: 5, quinto: 5, quinta: 5, seis: 6, siete: 7, ocho: 8 };
+  function numeroOpcion(texto) {
+    const t = normalizar(texto).replace(/^(?:el|la|numero|opcion|es el|es la)\s+/, "").replace(/^(?:numero|opcion)\s+/, "");
+    if (/^\d{1,2}$/.test(t)) return Number(t);
+    return NUMEROS[t] || null;
   }
 
   function candidatos(pedido, personas) {
@@ -122,41 +233,49 @@
       modo = "todos";
       q = q.replace(/^(?:todos los|todas las|todos|todas)\s+/, "").trim();
     }
-    if (!q) return [[], "Dime el nombre o el id.", modo];
+    if (!q) return [[], "¿A quién?", modo];
     const tokens = q.split(" ").filter((tok) => !["el", "la", "id", "numero"].includes(tok));
     const numeros = tokens.map(numeroId).filter((n) => n !== null);
-    if (numeros.length > 1) return [[], "Dime un id a la vez.", modo];
+    if (numeros.length > 1) return [[], "Un código a la vez.", modo];
     if (numeros.length === 1) {
       const quien = personas.filter((p) => numeroId(normalizar(p.id)) === numeros[0]);
-      if (!quien.length) return [[], `No hay nadie con el id E${String(numeros[0]).padStart(3, "0")}.`, modo];
+      if (!quien.length) return [[], `No hay nadie con el código E${String(numeros[0]).padStart(3, "0")}.`, modo];
       const resto = tokens.filter((tok) => numeroId(tok) === null);
       const palabras = normalizar(quien[0].nombre).split(" ");
       if (resto.length && resto.some((tok) => !palabras.includes(tok))) {
-        return [[], `El ${quien[0].id} es ${quien[0].nombre}. No coincide con ese nombre.`, modo];
+        return [[], `El ${quien[0].id} es ${quien[0].nombre}, no coincide.`, modo];
       }
       return [[quien[0]], null, modo];
     }
     const exactos = personas.filter((p) => normalizar(p.nombre) === q);
     if (exactos.length) return [exactos, null, modo];
-    return [personas.filter((p) => {
+    const contienen = personas.filter((p) => {
       const palabras = normalizar(p.nombre).split(" ");
       return tokens.every((tok) => palabras.includes(tok));
-    }), null, modo];
+    });
+    if (contienen.length || modo) return [contienen, null, modo];
+    const ap = aproximados(q, personas);           // nombre mal oído o mal escrito
+    if (ap.seguro) return [ap.seguro, null, modo];
+    if (ap.dudas) return [ap.dudas, null, "duda"];
+    return [[], null, modo];
   }
 
-  function resolverNombres(pedidos, personas) {
-    if (!personas.length) return [[], "No hay estudiantes cargados.", []];
-    const elegidos = [];
-    const vistos = new Set();
-    for (const pedido of pedidos) {
+  /* Devuelve [elegidos, error, opciones, pausa]. Si hay que preguntar «¿Cuál?», pausa guarda
+     los ya elegidos y los nombres que faltan, para seguir después de la respuesta. Nunca elige
+     entre dos parecidos: pregunta. */
+  function resolverNombres(pedidos, personas, previos = []) {
+    if (!personas.length) return [[], "No hay estudiantes cargados.", [], null];
+    const elegidos = [...previos];
+    const vistos = new Set(elegidos.map((p) => String(p.id)));
+    for (let k = 0; k < pedidos.length; k++) {
+      const pedido = pedidos[k];
       const [candidato, err, modo] = candidatos(pedido, personas);
-      if (err) return [[], err, []];
-      if (!candidato.length) return [[], `No encontré a ${pedido}.`, []];
-      if (modo === "par" && candidato.length !== 2) {
-        return [[], `De «${pedido}» hay ${candidato.length}, no dos: ${textoOpciones(candidato)}. Dime el id. No cambié a nadie.`, candidato];
-      }
-      if (candidato.length > 1 && modo !== "todos" && modo !== "par") {
-        return [[], `«${pedido}» hay ${candidato.length}: ${textoOpciones(candidato)}. Dime el apellido o el id. No cambié a nadie.`, candidato];
+      if (err) return [[], err, [], null];
+      if (!candidato.length) return [[], `No encontré a «${pedido}» en esta lista.`, [], null];
+      const pausa = { previos: elegidos.slice(), resto: pedidos.slice(k + 1), pedido };
+      if (modo === "par" && candidato.length !== 2) return [[], preguntaCual(candidato), candidato, pausa];
+      if (modo === "duda" || (candidato.length > 1 && modo !== "todos" && modo !== "par")) {
+        return [[], preguntaCual(candidato), candidato, pausa];
       }
       for (const persona of candidato) {
         if (!vistos.has(String(persona.id))) {
@@ -165,22 +284,48 @@
         }
       }
     }
-    return [elegidos, null, []];
+    return [elegidos, null, [], null];
   }
 
   function sprite(nombre) {
     return `/asistente/${nombre}.jpg`;
   }
 
-  function visema(letra) {
-    const c = String(letra || "").toLowerCase();
-    if ("aá".includes(c)) return "boca_a";
-    if ("eé".includes(c)) return "boca_e";
-    if ("iíy".includes(c)) return "boca_i";
-    if ("oó".includes(c)) return "boca_o";
-    if ("uúü".includes(c)) return "boca_u";
-    if ("mbp".includes(c)) return "boca_m";
-    return "reposo";
+  /* Boca al hablar: hablar_* son la cara en reposo con SOLO la boca cambiada (los ojos y la cara
+     no se mueven, así no parpadea). m, b, p y los espacios cierran la boca. */
+  const BOCAS = { a: "hablar_a", e: "hablar_e", i: "hablar_i", y: "hablar_i", o: "hablar_o", u: "hablar_u" };
+  function lineaBoca(texto) {
+    const t = String(texto || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const pasos = [];
+    const poner = (cara, ms, i) => {
+      const ult = pasos[pasos.length - 1];
+      if (ult && ult.cara === cara) { ult.ms += ms; return; }
+      pasos.push({ cara, ms, i });
+    };
+    for (let i = 0; i < t.length; i++) {
+      const c = t[i];
+      if (BOCAS[c] && !(c === "y" && /[aeiou]/.test(t[i + 1] || ""))) poner(BOCAS[c], 105, i);
+      else if ("mbp".includes(c)) poner("reposo", 65, i);
+      else if (/[.;:!?¿¡]/.test(c)) poner("reposo", 230, i);
+      else if (/[\s,]/.test(c)) poner("reposo", c === "," ? 160 : 35, i);
+      else if (/[a-z0-9]/.test(c)) {
+        if (/[0-9]/.test(c)) poner("hablar_e", 150, i);       // los números se dicen largos
+        else if (pasos.length) pasos[pasos.length - 1].ms += 30;
+      }
+    }
+    if (!pasos.length || pasos[pasos.length - 1].cara !== "reposo") pasos.push({ cara: "reposo", ms: 120, i: t.length });
+    return pasos;
+  }
+
+  /* Lo que se dice en voz: corto (sin códigos E001 ni comillas). */
+  function paraVoz(r) {
+    if (!r) return "";
+    if (typeof r === "object") return String(r.voz || r.texto || "");
+    return String(r).replace(/\s*\(E\d{1,4}\)/g, "").replace(/[«»]/g, "").trim();
+  }
+  function paraTexto(r) {
+    if (!r) return "";
+    return typeof r === "object" ? String(r.texto || r.voz || "") : String(r);
   }
 
   function miradaDe(dx, dy) {
@@ -197,7 +342,7 @@
      - enviar(): deja de oír y manda lo que ya oyó (botón enviar / soltar el micrófono).
      - cancelar(): deja de oír y no manda nada (botón basura / deslizar a la izquierda).
      Si nadie toca nada, termina solo cuando la persona deja de hablar, como siempre. */
-  function escuchar() {
+  function escuchar(alSonido = () => {}) {
     const SR = raiz.SpeechRecognition || raiz.webkitSpeechRecognition;
     if (!SR) return { promesa: Promise.reject(new Error("sin_oido")), enviar() {}, cancelar() {} };
     let rec = null;
@@ -217,11 +362,14 @@
           else parcial += r[0].transcript || "";
         }
       };
+      rec.onspeechstart = () => alSonido(true);
+      rec.onspeechend = () => alSonido(false);
       rec.onerror = (ev) => {
         if (cancelado || ev.error === "aborted") return;
         if (ev.error === "no-speech") return;      // onend lo cierra con ""
-        reject(new Error(ev.error === "not-allowed" || ev.error === "service-not-allowed"
-          ? "Permita el micrófono en el navegador." : "No pude oír. Escríbalo."));
+        reject(new Error(ev.error === "not-allowed" || ev.error === "service-not-allowed" ? "Permite el micrófono en el navegador."
+          : ev.error === "audio-capture" ? "No encuentro el micrófono."
+            : ev.error === "network" ? "Sin internet para la voz. Escríbelo." : "No te oí bien. Escríbelo."));
       };
       rec.onend = () => resolve(cancelado ? null : (final || parcial).trim());
       try { rec.start(); } catch (e) { reject(e); }
@@ -302,8 +450,8 @@
   }
 
   /* Mensaje del asistente sin que nadie escriba (p. ej. «Entraste a la lista …»). */
-  function avisar(texto) {
-    if (estado && estado.avisar && texto) estado.avisar(String(texto));
+  function avisar(r) {
+    if (estado && estado.avisar && r) estado.avisar(r);
   }
 
   /* Debajo del nombre «Asistente»: en qué lista o clase está el chat ahora. */
@@ -324,7 +472,7 @@
 
     // Se cargan todas las caras de una vez: al mover el ratón no hay parpadeos blancos.
     const precarga = ["reposo", "ojos_centro", ...MIRADAS.map(([n]) => n), "ojos_blink",
-      "boca_a", "boca_e", "boca_i", "boca_o", "boca_u", "boca_m"].map((n) => {
+      "hablar_a", "hablar_e", "hablar_i", "hablar_o", "hablar_u"].map((n) => {
       const im = new Image();
       im.decoding = "async";
       im.src = sprite(n);
@@ -396,11 +544,11 @@
       hilos.scrollTop = hilos.scrollHeight;
       return b;
     }
-    burbujaTexto("bot", "Hola. Escriba o mande audio. Por ejemplo: pon a Ana como presente, o entra a la lista 4821.");
+    burbujaTexto("bot", "Hola. Escribe o habla: «pon a Ana presente».");
     const caja = document.createElement("input");
     caja.className = "chat-caja";
     caja.type = "text";
-    caja.placeholder = "Escriba un mensaje";
+    caja.placeholder = "Escribe un mensaje";
     caja.setAttribute("aria-label", "Escribir mensaje");
     caja.enterKeyHint = "send";
     const enviar = document.createElement("button");
@@ -413,8 +561,8 @@
     const mic = document.createElement("button");
     mic.type = "button";
     mic.className = "chat-mic chat-redondo";
-    mic.setAttribute("aria-label", "Mandar audio (toque para hablar o mantenga presionado)");
-    mic.title = "Toque para hablar, o mantenga presionado y suelte para enviar";
+    mic.setAttribute("aria-label", "Mandar audio (toca para hablar o mantén presionado)");
+    mic.title = "Toca para hablar, o mantén presionado y suelta para enviar";
     mic.append(iconoSvg(ICONO_MIC));
     // Barra mientras oye: basura · punto rojo + 0:00 · ondas · enviar (como WhatsApp)
     const basura = document.createElement("button");
@@ -475,7 +623,7 @@
     document.body.append(nodo);
 
     const FUNDIDO_MS = 130;
-    function ponerFoto(par, url, suave) {
+    function ponerFoto(par, url, suave, ms = FUNDIDO_MS) {
       const actual = par.frente;
       if (actual.getAttribute("src") === url) return;     // misma cara: no se vuelve a pedir
       const otra = actual === par.a ? par.b : par.a;
@@ -495,54 +643,88 @@
       actual.style.zIndex = "1";
       otra.src = url;
       void otra.offsetWidth;
-      otra.style.transition = `opacity ${FUNDIDO_MS}ms ease-out`;
+      otra.style.transition = `opacity ${ms}ms ease-out`;
       otra.style.opacity = "1";
       par.frente = otra;
-      par.timer = setTimeout(() => { actual.style.transition = "none"; actual.style.opacity = "0"; }, FUNDIDO_MS + 20);
+      par.timer = setTimeout(() => { actual.style.transition = "none"; actual.style.opacity = "0"; }, ms + 20);
     }
 
-    function mostrarCara(nombre, suave) {
+    function mostrarCara(nombre, suave, ms) {
       const url = sprite(nombre);
       if (!parpadeo) {
-        ponerFoto(fotos, url, suave);
-        if (!hablando) ponerFoto(fotosBurbuja, url, suave);
+        ponerFoto(fotos, url, suave, ms);
+        ponerFoto(fotosBurbuja, url, suave, ms);
       }
     }
 
+    /* Boca: sigue una línea de tiempo sacada del texto (vocales, m/b/p cerradas, pausas en comas
+       y puntos). Si el navegador avisa por qué palabra va (onboundary), se re-sincroniza ahí. */
+    let boca = null;            // { pasos, k, desde, raf }
     function callar() {
       clearInterval(timerBoca);
+      if (boca) cancelAnimationFrame(boca.raf);
+      boca = null;
       hablando = false;
       cara.dataset.modo = "";
-      mostrarCara(mirada);
+      mostrarCara(mirada, true, 90);
     }
 
     function animarBoca(texto) {
       clearInterval(timerBoca);
-      const letras = Array.from(String(texto || "")).filter((c) => c.trim());
-      if (!letras.length) { callar(); return; }
+      if (boca) cancelAnimationFrame(boca.raf);
+      const pasos = lineaBoca(texto);
+      if (pasos.length < 2) { callar(); return; }
       hablando = true;
       cara.dataset.modo = "habla";
-      let i = 0;
-      mostrarCara(visema(letras[0]));
-      timerBoca = setInterval(() => {
-        i = (i + 1) % letras.length;
-        mostrarCara(visema(letras[i]));
-      }, 85);
+      boca = { pasos, k: -1, desde: performance.now(), raf: 0, sigue: true };
+      const tic = (ahora) => {
+        if (!boca) return;
+        let t = ahora - boca.desde;
+        let k = 0;
+        while (k < boca.pasos.length && t >= boca.pasos[k].ms) { t -= boca.pasos[k].ms; k++; }
+        if (k >= boca.pasos.length) {
+          if (!boca.sigue) { callar(); return; }
+          // la voz va más lenta que lo calculado: repite suave la última palabra hasta que termine
+          boca.desde = ahora - boca.pasos.slice(0, Math.max(0, boca.pasos.length - 4)).reduce((x, p) => x + p.ms, 0);
+          k = Math.max(0, boca.pasos.length - 4);
+        }
+        if (k !== boca.k) {
+          boca.k = k;
+          mostrarCara(boca.pasos[k].cara, true, 55);
+        }
+        boca.raf = requestAnimationFrame(tic);
+      };
+      boca.raf = requestAnimationFrame(tic);
     }
 
-    function decir(texto) {
+    function sincronizar(indice) {
+      if (!boca) return;
+      const k = boca.pasos.findIndex((p) => p.i >= indice);
+      if (k < 0) return;
+      boca.desde = performance.now() - boca.pasos.slice(0, k).reduce((x, p) => x + p.ms, 0);
+    }
+
+    function decir(r) {
+      const texto = paraVoz(r);
       animarBoca(texto);
       const voz = raiz.speechSynthesis;
-      const letras = Array.from(String(texto || "")).filter((c) => c.trim()).length;
-      if (!voz || !texto) { setTimeout(callar, Math.max(500, letras * 80)); return; }
+      if (!voz || !texto || typeof SpeechSynthesisUtterance === "undefined") { if (boca) boca.sigue = false; return; }
       voz.cancel();
       const frase = new SpeechSynthesisUtterance(texto);
       frase.lang = "es-CO";
+      frase.rate = 1.05;
       const elegida = voz.getVoices().find((v) => v.lang && v.lang.toLowerCase().startsWith("es"));
       if (elegida) frase.voice = elegida;
+      frase.onstart = () => { if (boca) boca.desde = performance.now(); };
+      frase.onboundary = (ev) => { if (typeof ev.charIndex === "number") sincronizar(ev.charIndex); };
       frase.onend = callar;
       frase.onerror = callar;
-      voz.speak(frase);
+      try { voz.speak(frase); } catch { if (boca) boca.sigue = false; }   // sin voz: la boca termina sola
+    }
+
+    function callarVoz() {
+      try { if (raiz.speechSynthesis) raiz.speechSynthesis.cancel(); } catch { /* nada */ }
+      if (hablando) callar();
     }
 
     function abrir(si) {
@@ -643,17 +825,18 @@
       }, 140);
     }, 3800);
 
-    function mostrar(texto) {
-      if (!texto) return;     // p. ej. al entrar a una lista: el aviso «Entraste a…» llega solo
-      burbujaTexto("bot", texto).dataset.fijo = "1";
-      decir(texto);
+    function mostrar(r) {
+      if (!r) return;     // p. ej. al entrar a una lista: el aviso llega solo
+      burbujaTexto("bot", paraTexto(r)).dataset.fijo = "1";
+      decir(r);
     }
 
-    function avisarAqui(texto) {
+    function avisarAqui(r) {
+      const texto = paraTexto(r);
       burbujaTexto("bot", texto).dataset.fijo = "1";
-      if (abierto) { decir(texto); return; }
-      animarBoca(texto);
-      setTimeout(callar, Math.min(2600, Math.max(700, texto.length * 45)));
+      if (abierto) { decir(r); return; }
+      animarBoca(paraVoz(r));
+      if (boca) boca.sigue = false;     // sin voz: la boca termina sola
       aviso.textContent = texto;
       aviso.hidden = false;
       burbuja.classList.add("con-aviso");
@@ -668,44 +851,62 @@
 
     estado = { foto, fotoBurbuja, cara, caja, precarga, avisar: avisarAqui, lugar: ponerLugar };
 
+    async function seguirCon(pausa, accion, elegidos) {
+      // tras elegir, se siguen los nombres que faltaban de la misma orden
+      if (pausa.resto && pausa.resto.length) {
+        const lista = await Promise.resolve(ctx.personas());
+        const [mas, err, opciones, otra] = resolverNombres(pausa.resto, lista, elegidos);
+        if (opciones.length) { aclaracion = { accion, opciones, pausa: otra }; return err; }
+        if (err) return err;
+        elegidos = mas;
+      }
+      if (!elegidos.length) return "No cambié a nadie.";
+      return ctx.actuar({ accion, elegidos });
+    }
+
     async function turno(texto) {
       const orden = interpretar(texto);
       if (aclaracion && (orden.accion === "no" || orden.accion === "falta_nombre")) {
         const t = normalizar(texto);
-        const pidePar = /^(los dos|las dos|ambos|ambas)\b/.test(t);
-        const pideTodos = /^(todos|todas)\b/.test(t);
-        let elegidos, err, opciones;
-        if (pidePar || pideTodos) {
-          const grupo = aclaracion.opciones || [];
-          if (pidePar && grupo.length !== 2) return `Hay ${grupo.length}, no dos. Dime el id.`;
-          elegidos = grupo; err = null; opciones = [];
-        } else {
-          [elegidos, err, opciones] = resolverNombres([texto], aclaracion.opciones || []);
-        }
-        if (opciones && opciones.length) { aclaracion = { ...aclaracion, opciones }; return err || "Sigo sin saber cuál."; }
-        if (err) return err;
-        if (!elegidos.length) return "No quedó nadie para cambiar.";
+        const grupo = aclaracion.opciones || [];
+        const pausa = aclaracion.pausa || { previos: [], resto: [] };
         const pendiente = aclaracion;
+        if (/^(no|ninguno|ninguna|ningun|cancela|cancelar|nada|olvidalo)$/.test(t)) { aclaracion = null; return "Vale, no cambié nada."; }
+        let elegidos = null;
+        const n = numeroOpcion(t);
+        if (n && n >= 1 && n <= grupo.length) elegidos = [grupo[n - 1]];
+        else if (grupo.length === 1 && /^(si|sip|ese|esa|eso|correcto|exacto|dale|claro)\b/.test(t)) elegidos = [grupo[0]];
+        else if (n) return `Elige del 1 al ${grupo.length}.`;
+        else if (/^(los dos|las dos|ambos|ambas)\b/.test(t)) {
+          if (grupo.length !== 2) return `Son ${grupo.length}, no dos. Dime el número.`;
+          elegidos = grupo;
+        } else if (/^(todos|todas)\b/.test(t)) elegidos = grupo;
+        else {
+          const [elegido, err, opciones, otra] = resolverNombres([texto], grupo);
+          if (opciones && opciones.length) { aclaracion = { ...aclaracion, opciones, pausa: { ...pausa, previos: pausa.previos } }; return err; }
+          if (err) return { texto: "Sigo sin saber cuál. Dime el número.", voz: "Dime el número." };
+          elegidos = elegido;
+        }
         aclaracion = null;
-        return ctx.actuar({ accion: pendiente.accion, elegidos });
+        return seguirCon(pausa, pendiente.accion, [...(pausa.previos || []), ...elegidos.filter((p) => !(pausa.previos || []).some((q) => String(q.id) === String(p.id)))]);
       }
       aclaracion = null;
       if (orden.accion === "entrar") {
-        if (!orden.codigo && !orden.nombre) return "Dime el código de 4 números de la lista, o el nombre de la clase. Por ejemplo: entra a la lista 4821.";
-        if (!navegar) return "Aquí no puedo cambiar de lista. Vuelva a Mis clases.";
+        if (!orden.codigo && !orden.nombre) return "Dime el código de 4 números.";
+        if (!navegar) return "Desde aquí no puedo cambiar de lista.";
         return navegar({ codigo: orden.codigo, nombre: orden.nombre, tipo: orden.tipo });
       }
       if (orden.accion === "ayuda") return AYUDA;
-      if (orden.accion === "falta_nombre") return "Dime el nombre. Por ejemplo: pon a Ana como presente.";
-      if (orden.accion === "no") return "No entendí. " + AYUDA;
+      if (orden.accion === "falta_nombre") return "¿A quién?";
+      if (orden.accion === "no") return { texto: "No entendí. Escribe «ayuda» para ver qué puedo hacer.", voz: "No entendí." };
       if (orden.accion === "pasar") return ctx.actuar({ accion: "pasar" });
       if (orden.accion === "agregar") {
-        if (orden.nombres.length !== 1) return "Agregue a uno por uno, porque cada estudiante lleva su foto.";
+        if (orden.nombres.length !== 1) return "Uno a la vez: cada uno lleva su foto.";
         return ctx.actuar({ accion: "agregar", nombre: orden.nombres[0] });
       }
       const lista = await Promise.resolve(ctx.personas());
-      const [elegidos, err, opciones] = resolverNombres(orden.nombres, lista);
-      if (opciones.length) { aclaracion = { accion: orden.accion, opciones }; return err; }
+      const [elegidos, err, opciones, pausa] = resolverNombres(orden.nombres, lista);
+      if (opciones.length) { aclaracion = { accion: orden.accion, opciones, pausa }; return err; }
       if (err) return err;
       return ctx.actuar({ accion: orden.accion, elegidos });
     }
@@ -735,54 +936,10 @@
     let oyendo = null;          // { control, inicio, timer, medidor }
     let mantener = null;        // { x, t, id } mientras se mantiene presionado
 
+    /* Las ondas se mueven solas y suben cuando el navegador detecta voz (onspeechstart).
+       No se abre el micrófono una segunda vez: así no le quita el audio al reconocimiento. */
     function medirVoz() {
-      // Ondas con el nivel real de la voz si el navegador deja (computador). En el celular se
-      // dibujan solas, para no pelear por el micrófono con el reconocimiento de voz.
-      const tactil = !!(raiz.matchMedia && raiz.matchMedia("(pointer: coarse)").matches);
-      const AC = raiz.AudioContext || raiz.webkitAudioContext;
-      const md = raiz.navigator && raiz.navigator.mediaDevices;
-      const med = { parar() {}, real: false };
-      if (tactil || !AC || !md || !md.getUserMedia) return med;
-      let vivo = true;
-      let pista = null;
-      let ctxAudio = null;
-      let raf = 0;
-      med.parar = () => {
-        vivo = false;
-        cancelAnimationFrame(raf);
-        if (pista) pista.getTracks().forEach((t) => t.stop());
-        if (ctxAudio) ctxAudio.close().catch(() => {});
-        barras.forEach((b) => { b.style.transform = ""; });
-        grabando.classList.remove("nivel-real");
-      };
-      md.getUserMedia({ audio: true }).then((st) => {
-        if (!vivo) { st.getTracks().forEach((t) => t.stop()); return; }
-        pista = st;
-        ctxAudio = new AC();
-        const an = ctxAudio.createAnalyser();
-        an.fftSize = 256;
-        ctxAudio.createMediaStreamSource(st).connect(an);
-        const datos = new Uint8Array(an.fftSize);
-        const historia = barras.map(() => 0.18);
-        let ultimo = 0;
-        grabando.classList.add("nivel-real");
-        med.real = true;
-        const pintar = (t) => {
-          if (!vivo) return;
-          raf = requestAnimationFrame(pintar);
-          if (t - ultimo < 70) return;
-          ultimo = t;
-          an.getByteTimeDomainData(datos);
-          let suma = 0;
-          for (const v of datos) suma += ((v - 128) / 128) ** 2;
-          const nivel = Math.min(1, Math.sqrt(suma / datos.length) * 4.5);
-          historia.shift();
-          historia.push(Math.max(0.18, nivel));
-          barras.forEach((b, i) => { b.style.transform = `scaleY(${historia[i].toFixed(2)})`; });
-        };
-        raf = requestAnimationFrame(pintar);
-      }).catch(() => { /* sin permiso para medir: quedan las ondas animadas */ });
-      return med;
+      return { parar() { grabando.classList.remove("con-voz"); } };
     }
 
     function pintarReloj() {
@@ -810,7 +967,8 @@
       if (ocupado || oyendo) return;
       ocupado = true;
       abrir(true);
-      const control = escuchar();
+      callarVoz();                 // que el asistente no hable encima (ni se oiga a sí mismo)
+      const control = escuchar((hay) => grabando.classList.toggle("con-voz", hay));
       oyendo = { control, inicio: Date.now(), timer: 0, medidor: { parar() {} } };
       grabacion = () => control.cancelar();
       cara.dataset.modo = "oye";
@@ -823,18 +981,19 @@
       oyendo.medidor = medirVoz();
       try {
         const texto = await control.promesa;
+        const duro = Date.now() - oyendo.inicio;
         terminarOido();
-        if (texto === null) burbujaTexto("bot", "Audio cancelado.");
-        else if (!texto) mostrar("No oí nada. Intente otra vez o escríbalo.");
-        else {
+        if (texto === null) { /* cancelado: sin mensaje */ }
+        else if (!texto) {
+          // muy corto = el micrófono no alcanzó a arrancar; si no, de verdad no se oyó nada
+          burbujaTexto("bot", duro < 1200 ? "El micrófono no arrancó. Toca otra vez." : "No te oí. Intenta otra vez.").dataset.fijo = "1";
+        } else {
           burbujaTexto("yo", texto).dataset.fijo = "1";
           mostrar(await turno(texto));
         }
       } catch (e) {
         terminarOido();
-        mostrar(e.message === "sin_oido"
-          ? "Este navegador no tiene micrófono de voz. Escríbame el mensaje."
-          : (e.message || "No pude oír."));
+        mostrar(e.message === "sin_oido" ? "Este navegador no reconoce voz. Escríbelo." : (e.message || "No te oí."));
       }
       if (!hablando) cara.dataset.modo = "";
       ocupado = false;
@@ -882,5 +1041,5 @@
     enviarAudio.addEventListener("click", () => { if (!recien()) enviarOido(); });
   }
 
-  raiz.Asistente = { normalizar, interpretar, resolverNombres, montar, contexto, quitar, alEntrar, avisar, lugar, AYUDA };
+  raiz.Asistente = { normalizar, interpretar, resolverNombres, aproximados, numeroOpcion, lineaBoca, paraVoz, montar, contexto, quitar, alEntrar, avisar, lugar, AYUDA };
 })(typeof window !== "undefined" ? window : globalThis);
