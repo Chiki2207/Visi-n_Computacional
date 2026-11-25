@@ -225,6 +225,206 @@ async function pruebaAsync(nombre, fn) {
     assert.ok(hechos.every((h) => !h.elegidos || !h.elegidos.length));
   });
 
+
+  /* Lista con Ana Sofía, como en el caso real. No se usa en las pruebas anteriores
+     para no mezclar «Ana Pérez» (dos hermanas) con una tercera Ana. */
+  const LISTA_CLASE = LISTA.concat([{ id: "E008", nombre: "Ana Sofía Pérez Ortega" }]);
+  function conversacionClase() {
+    const hechos = [];
+    A.alInterpretar(null);
+    A.contexto({
+      personas: async () => LISTA_CLASE,
+      actuar: async (p) => {
+        hechos.push(p);
+        if (p.accion === "presente" || p.accion === "ausente") {
+          const n = p.elegidos.map((x) => x.nombre).join(" y ");
+          const quedo = p.elegidos.length > 1 ? "quedaron" : "quedó";
+          return `Listo. ${n} ${quedo} ${p.accion}.`;
+        }
+        if (p.accion === "agregar") return "agregar:" + p.nombre;
+        if (p.accion === "pasar") return "pasar";
+        return "ok";
+      },
+      donde: () => "Clase X",
+    });
+    return { d: A.nuevoDialogo(), hechos };
+  }
+  async function turnoClase(frase, dPrev) {
+    const ctx = dPrev ? dPrev : conversacionClase();
+    const resp = textoDe(await ctx.d.turno(frase));
+    return { resp, hechos: ctx.hechos, d: ctx.d, ctx };
+  }
+
+  console.log("\nPresente y ausente (camino real del chat, sin Gemini):");
+  await pruebaAsync("el caso que falló en vivo: «Ponme como ausente Ana Sofía» marca ausente", async () => {
+    for (const f of [
+      "Ponme como presente a Ana Sofía",
+      "Ponme como ausente Ana Sofía",
+      "Ponme como ausente Ana Sofía",
+      "Ponme como ausente de Ana Sofía",
+    ]) {
+      const { resp, hechos } = await turnoClase(f);
+      const esperada = /presente/i.test(f) ? "presente" : "ausente";
+      assert.strictEqual(hechos.length, 1, f + " → " + resp);
+      assert.strictEqual(hechos[0].accion, esperada, f);
+      assert.deepStrictEqual(hechos[0].elegidos.map((p) => p.id), ["E008"], f);
+      if (esperada === "ausente") assert.match(resp, /quedó ausente/);
+      else assert.match(resp, /quedó presente/);
+    }
+  });
+
+  const CASOS = [];
+  const verbos = ["ponme", "pon", "pónme", "pongame", "márcame", "marca", "coloca", "deja", "registra"];
+  const preps = ["", "a ", "de ", "al ", "la "];
+  for (const v of verbos) {
+    for (const estado of ["presente", "ausente"]) {
+      for (const prep of preps) {
+        CASOS.push([`${v} como ${estado} ${prep}Ana Sofía`, estado, ["E008"]]);
+        CASOS.push([`${v} a Ana Sofía como ${estado}`, estado, ["E008"]]);
+        CASOS.push([`${v} ${estado} ${prep}Ana Sofía`, estado, ["E008"]]);
+      }
+    }
+  }
+  const SUELTAS = [
+    ["ponme ausente a Ana Sofía", "ausente", ["E008"]],
+    ["ponme presente a Ana Sofía", "presente", ["E008"]],
+    ["Ana Sofía ausente", "ausente", ["E008"]],
+    ["Ana Sofía presente", "presente", ["E008"]],
+    ["ana sofia ausente", "ausente", ["E008"]],
+    ["ana sofia presente", "presente", ["E008"]],
+    ["Ana Sofía está ausente", "ausente", ["E008"]],
+    ["Ana Sofía esta presente", "presente", ["E008"]],
+    ["Ana Sofía no está", "ausente", ["E008"]],
+    ["Ana Sofía no esta", "ausente", ["E008"]],
+    ["Ana Sofía no vino", "ausente", ["E008"]],
+    ["ana sofia no vino", "ausente", ["E008"]],
+    ["Ana Sofía faltó", "ausente", ["E008"]],
+    ["Ana Sofía falto", "ausente", ["E008"]],
+    ["falta Ana Sofía", "ausente", ["E008"]],
+    ["falta ana sofia", "ausente", ["E008"]],
+    ["ponle falta a Ana Sofía", "ausente", ["E008"]],
+    ["ponle falta a ana sofia", "ausente", ["E008"]],
+    ["marca inasistencia a Ana Sofía", "ausente", ["E008"]],
+    ["cambia a Ana Sofía a ausente", "ausente", ["E008"]],
+    ["cambia a Ana Sofía a presente", "presente", ["E008"]],
+    ["pasa Ana Sofía a ausente", "ausente", ["E008"]],
+    ["pasa a Ana Sofía a presente", "presente", ["E008"]],
+    ["ausentes Ana Sofía y Juan Pablo", "ausente", ["E008", "E006"]],
+    ["presentes Ana Sofía y Juan Pablo", "presente", ["E008", "E006"]],
+    ["ponme como activo a Ana Sofía", "presente", ["E008"]],
+    ["Ana Sofía activo", "presente", ["E008"]],
+    ["ana sofia activa", "presente", ["E008"]],
+    ["activa a Ana Sofía", "presente", ["E008"]],
+    ["Ana Sofía inactivo", "ausente", ["E008"]],
+    ["inactiva a Ana Sofía", "ausente", ["E008"]],
+    ["ponme como inactivo a Ana Sofía", "ausente", ["E008"]],
+    ["Ana Sofía está, ponla", "presente", ["E008"]],
+    ["ana sofia esta ponla", "presente", ["E008"]],
+    ["ya llegó Ana Sofía", "presente", ["E008"]],
+    ["ya llego ana sofia", "presente", ["E008"]],
+    ["Ana Sofía llegó", "presente", ["E008"]],
+    ["Ana Sofía esta aquí", "presente", ["E008"]],
+    ["Ana Sofía está aquí", "presente", ["E008"]],
+    ["Ana Sofía sí vino", "presente", ["E008"]],
+    ["ana sofia si vino", "presente", ["E008"]],
+    ["Ana Sofía vino", "presente", ["E008"]],
+    ["Ana Sofía asistió", "presente", ["E008"]],
+    ["asistió Ana Sofía", "presente", ["E008"]],
+    ["llegó Ana Sofía", "presente", ["E008"]],
+    ["vino Ana Sofía", "presente", ["E008"]],
+    ["Valentina no vino", "ausente", ["E007"]],
+    ["falta Valentina Zuluaga", "ausente", ["E007"]],
+    ["pon a valentina zuluaga como ausente", "ausente", ["E007"]],
+    ["marca como ausente a valentina zuluaga", "ausente", ["E007"]],
+    ["Juan Pablo Muñoz presente", "presente", ["E006"]],
+    ["juan pablo munoz ausente", "ausente", ["E006"]],
+    ["X no vino".replace("X", "Juan Pablo"), "ausente", ["E006"]],
+  ];
+  for (const c of SUELTAS) CASOS.push(c);
+
+  await pruebaAsync("tabla de frases de asistencia por el camino real del chat", async () => {
+    let n = 0;
+    const vistos = new Set();
+    for (const [frase, accion, ids] of CASOS) {
+      const clave = frase.trim().toLowerCase() + "|" + accion;
+      if (vistos.has(clave)) continue;
+      vistos.add(clave);
+      const { resp, hechos } = await turnoClase(frase);
+      assert.strictEqual(hechos.length, 1, `«${frase}» no actuó: ${resp}`);
+      assert.strictEqual(hechos[0].accion, accion, `«${frase}» → ${hechos[0].accion} (quería ${accion}): ${resp}`);
+      assert.deepStrictEqual(hechos[0].elegidos.map((p) => p.id), ids, `«${frase}» ids ${hechos[0].elegidos.map((p) => p.id)} != ${ids}: ${resp}`);
+      n++;
+    }
+    assert.ok(n >= 120, "hacen falta al menos 120 frases, van " + n);
+    console.log("       (" + n + " frases distintas, todas bien)");
+  });
+
+  await pruebaAsync("«ponla» y «márcala» usan al último estudiante nombrado", async () => {
+    const ctx = conversacionClase();
+    const a = await turnoClase("Ponme como presente a Ana Sofía", ctx);
+    assert.strictEqual(a.hechos[0].accion, "presente");
+    const b = await turnoClase("ponla", ctx);
+    assert.strictEqual(b.hechos.length, 2, b.resp);
+    assert.strictEqual(b.hechos[1].accion, "presente");
+    assert.deepStrictEqual(b.hechos[1].elegidos.map((p) => p.id), ["E008"]);
+    const c = await turnoClase("márcala", ctx);
+    assert.strictEqual(c.hechos[2].accion, "presente");
+    const d = await turnoClase("ponla ausente", ctx);
+    assert.strictEqual(d.hechos[3].accion, "ausente");
+    assert.deepStrictEqual(d.hechos[3].elegidos.map((p) => p.id), ["E008"]);
+  });
+  await pruebaAsync("«ponla» sin nadie antes pregunta a quién, no dice «No entendí» por un nombre", async () => {
+    const { resp, hechos } = await turnoClase("ponla");
+    assert.strictEqual(resp, "¿A quién?");
+    assert.strictEqual(hechos.length, 0);
+  });
+  await pruebaAsync("si solo nombra a un estudiante, pregunta presente o ausente (nunca «No entendí»)", async () => {
+    const ctx = conversacionClase();
+    const a = await turnoClase("Ana Sofía", ctx);
+    assert.strictEqual(a.resp, "¿Qué hago con Ana Sofía Pérez Ortega: presente o ausente?");
+    assert.strictEqual(a.hechos.length, 0);
+    const b = await turnoClase("ausente", ctx);
+    assert.strictEqual(b.hechos.length, 1);
+    assert.strictEqual(b.hechos[0].accion, "ausente");
+    assert.deepStrictEqual(b.hechos[0].elegidos.map((p) => p.id), ["E008"]);
+  });
+  await pruebaAsync("un «no» solo no marca ni elimina a nadie", async () => {
+    const { resp, hechos } = await turnoClase("no");
+    assert.strictEqual(resp, "No tengo nada pendiente. ¿Qué hago?");
+    assert.strictEqual(hechos.length, 0);
+    assert.strictEqual(A.interpretar("no").accion, "no");
+  });
+  await pruebaAsync("eliminar no se come las frases de ausente, ni al revés", async () => {
+    const a = await turnoClase("elimina a Juan Pablo Muñoz");
+    assert.match(a.resp, /^¿Elimino a Juan Pablo Muñoz/);
+    assert.strictEqual(a.hechos.length, 0);
+    const b = await turnoClase("quita a Juan Pablo Muñoz");
+    assert.strictEqual(b.hechos[0].accion, "ausente");
+    const c = await turnoClase("borra el presente de Juan Pablo Muñoz");
+    assert.strictEqual(c.hechos[0].accion, "ausente");
+    const d = await turnoClase("saca a Juan Pablo Muñoz de la clase");
+    assert.match(d.resp, /^¿Elimino a Juan Pablo Muñoz/);
+  });
+  await pruebaAsync("otras órdenes siguen igual (ayuda, agregar, pasar, código)", async () => {
+    const a = await turnoClase("ayuda");
+    assert.match(a.resp, /presente o ausente/);
+    const b = await turnoClase("agrega a Pedro Pérez");
+    assert.strictEqual(b.hechos[0].accion, "agregar");
+    const c = await turnoClase("pasa la lista");
+    assert.strictEqual(c.hechos[0].accion, "pasar");
+    const vistos = [];
+    A.alEntrar(async (o) => { vistos.push(o); return null; });
+    await turnoClase("4821");
+    assert.deepStrictEqual(vistos, [{ codigo: "4821", nombre: "", tipo: "" }]);
+    A.alEntrar(null);
+  });
+  await pruebaAsync("una frase sin nombre de la lista sigue en «No entendí» (sin Gemini)", async () => {
+    const { resp, hechos } = await turnoClase("qué hora es en Bogotá");
+    assert.strictEqual(resp, "No entendí. Escribe «ayuda» para ver qué puedo hacer.");
+    assert.strictEqual(hechos.length, 0);
+  });
+
+
   console.log("\nRespaldo (Gemini simulado, sin internet):");
   const NO_ENT = "No entendí. Escribe «ayuda» para ver qué puedo hacer.";
   function conRespaldo(fn) {
@@ -241,10 +441,19 @@ async function pruebaAsync(nombre, fn) {
     assert.strictEqual(llamadas.length, 0);
     assert.strictEqual(hechos[0].accion, "presente");
   });
-  await pruebaAsync("frase rara: el respaldo la interpreta y el nombre pasa por el buscador real", async () => {
+  await pruebaAsync("«sí llegó» ya lo entienden las reglas, sin llamar al respaldo", async () => {
     const llamadas = conRespaldo(() => ({ ok: true, accion: "presente", nombres: ["luis enrique arana ortis"], confianza: 0.9 }));
     const { d, hechos } = conversacion();
     await d.turno("oiga profe, el Luis Enrique sí llegó, anótemelo");
+    assert.strictEqual(llamadas.length, 0);
+    assert.strictEqual(hechos.length, 1);
+    assert.strictEqual(hechos[0].accion, "presente");
+    assert.deepStrictEqual(hechos[0].elegidos.map((p) => p.id), ["E002"]);
+  });
+  await pruebaAsync("frase rara sin nombre de la lista: el respaldo la interpreta y el nombre pasa por el buscador real", async () => {
+    const llamadas = conRespaldo(() => ({ ok: true, accion: "presente", nombres: ["luis enrique arana ortis"], confianza: 0.9 }));
+    const { d, hechos } = conversacion();
+    await d.turno("apúntame al de la camisa roja, porfa");
     assert.strictEqual(llamadas.length, 1);
     assert.ok(llamadas[0].nombres.includes("Luis Enrique Avendaño Ortiz"));     // se mandan los nombres de la clase
     assert.strictEqual(hechos.length, 1);
@@ -289,12 +498,23 @@ async function pruebaAsync(nombre, fn) {
     assert.strictEqual(textoDe(await d.turno("algo raro")), NO_ENT);
     assert.strictEqual(hechos.length, 0);
   });
+  await pruebaAsync("«abre la lista cuatro ocho dos uno» ya lo entienden las reglas (sin respaldo)", async () => {
+    const llamadas = conRespaldo(() => ({ ok: true, accion: "entrar", codigo: "1111", destino: "", tipo: "lista", confianza: 0.9 }));
+    const vistos = [];
+    A.alEntrar(async (o) => { vistos.push(o); return null; });
+    const { d } = conversacion();
+    await d.turno("hágame el favor y me abre la lista cuatro ocho dos uno");
+    assert.strictEqual(llamadas.length, 0);
+    assert.strictEqual(vistos.length, 1);
+    assert.strictEqual(vistos[0].codigo, "4821");
+    A.alEntrar(null);
+  });
   await pruebaAsync("entrar a una lista por el respaldo usa la misma navegación", async () => {
     conRespaldo(() => ({ ok: true, accion: "entrar", codigo: "4821", destino: "", tipo: "lista", confianza: 0.9 }));
     const vistos = [];
     A.alEntrar(async (o) => { vistos.push(o); return null; });
     const { d } = conversacion();
-    await d.turno("hágame el favor y me abre la lista cuatro ocho dos uno");
+    await d.turno("la de los de segundo semestre del martes, esa");
     assert.deepStrictEqual(vistos, [{ codigo: "4821", nombre: "", tipo: "lista" }]);
     A.alEntrar(null);
   });

@@ -29,7 +29,15 @@
   function partirNombres(trozo) {
     let t = trozo.trim().replace(/^(a|al|los|las|el|la)\s+/, "");
     t = t.replace(/\s+e\s+(?=[ie])/g, ", ").replace(/\s+y\s+/g, ", ");
-    const fuera = new Set(["presente", "presentes", "ausente", "ausentes", "estudiante", "alumno", "alumna"]);
+    const fuera = new Set([
+      "presente", "presentes", "ausente", "ausentes",
+      "activo", "activos", "activa", "activas",
+      "inactivo", "inactivos", "inactiva", "inactivas",
+      "asistencia", "asistencias", "inasistencia", "inasistencias",
+      "falta", "faltas", "aqui", "aca",
+      "estudiante", "estudiantes", "alumno", "alumna", "alumnos", "alumnas",
+      "como", "ponla", "ponlo", "ponle", "ponlas", "ponlos", "marcala", "marcalo",
+    ]);
     return t.split(",").map((parte) => parte.trim()
       .replace(/^(a|al|de|el|la)\s+/, "")
       .replace(/\s+por favor$/, "")).filter((n) => n && !fuera.has(n));
@@ -107,34 +115,242 @@
     };
   }
 
-  function interpretar(texto) {
-    let t = normalizar(texto)
-      .replace(/^(oye |hola |buenas |por favor |quiero que |quiero |necesito |puedes |puede |me )+/, "")
-      .replace(/\b(pongas|ponga|ponme|pongan|poner)\b/g, "pon")
-      .replace(/\b(marques|marque|marcar)\b/g, "marca")
+  /* ---------- Asistencia en lenguaje suelto (solo reglas) ----------
+     1. Se quita el relleno («eh», «pues», «parce», «porfa», «a ver»…).
+     2. Se buscan palabras de estado en cualquier parte: presente/activo/llegó/vino/asistió/está aquí,
+        ausente/inactivo/faltó/falta/no vino/no está/no ha llegado.
+     3. Lo que queda, sin verbos ni preposiciones, es el nombre (o varios, separados por «y» o comas).
+     4. Si hay dos estados en una frase («Ana presente y Juan ausente») se parten en dos órdenes.
+     Si no hay estado claro, no se adivina: se pregunta «¿presente o ausente?». */
+  const RELLENO = new RegExp("(?:^| )(?:" + [
+    "e+h+m*", "e+m+", "m{2,}", "pues", "parce", "parcero", "parcera", "porfa", "porfis", "porfi", "porfavor", "por favor", "por fa",
+    "muchas gracias", "mil gracias", "gracias", "oye", "oiga", "oigan", "mira", "mire", "a ver", "bueno", "profe", "profesor", "profesora",
+    "(?:hagame|hazme|me hace|me haces|hagan|haga) el favor(?: de| y)?", "que pena", "hoy", "todavia", "aun", "ahora", "ahorita", "ya",
+    "entonces", "tambien", "senor", "senora", "listo", "dale", "quiero que", "quiero", "necesito que", "necesito", "puedes", "puede", "podrias",
+    "me puedes", "me puede", "vale",
+  ].join("|") + ")(?= |$)", "g");
+  function limpiar(t) {
+    let s = " " + t + " ", antes;
+    do { antes = s; s = s.replace(RELLENO, " "); } while (s !== antes);
+    return s.replace(/\s+/g, " ").trim();
+  }
+  /* Como normalizar, pero deja las comas (separan nombres u órdenes). */
+  function normalizarConComas(texto) {
+    return String(texto || "").trim().toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[,;]+/g, " , ")
+      .replace(/[¿?¡!.:"«»()]+/g, " ")
+      .replace(/\s+/g, " ").trim();
+  }
+
+  const PAL_AUS = "ausentes?|inactiv[oa]s?|inasistencias?|faltas?|falto|faltaron|faltan|falte";
+  const PAL_PRES = "presentes?|activ[oa]s?|asistencias?|llego|llegaron|vino|vinieron|asistio|asistieron|aqui|aca";
+  const NEGADO = /(?:^| )no (?:ha |han |se |lo |la |)(?:vino|vinieron|viene|vienen|venido|llego|llegaron|llega|llegan|llegado|asistio|asistieron|asiste|esta|estan|aparecio|aparece)(?= |$)/g;
+  function estadoDe(t) {
+    let s = " " + t + " ";
+    let aus = false, pres = false;
+    if (NEGADO.test(s)) { aus = true; s = s.replace(NEGADO, " "); }
+    NEGADO.lastIndex = 0;
+    if (new RegExp("(?:^| )(?:" + PAL_AUS + ")(?= |$)").test(s)) aus = true;
+    if (new RegExp("(?:^| )(?:" + PAL_PRES + ")(?= |$)").test(s)) pres = true;
+    if (/(?:^| )tampoco(?= |$)/.test(s)) aus = true;
+    const debil = !aus && !pres && /(?:^| )(?:esta|estan)(?= |$)/.test(s);
+    // «… y Valentina sí» / «… y Juan no»: la frase anterior se sobreentiende
+    const palabras = s.trim().split(" ").filter((w) => w && !/^(?:si|no|y|pero|a|al|la|el|de|mejor|que)$/.test(w));
+    const eliptico = !aus && !pres && !debil && palabras.length ? (/ si $/.test(s) ? "pres" : / no $/.test(s) ? "aus" : "") : "";
+    return { aus: aus || eliptico === "aus", pres: pres || debil || eliptico === "pres" };
+  }
+
+  const VERBO_ASIS = "(?:pon|pone|poner|ponerla|ponerlo|pongo|ponme|ponla|ponlo|ponle|ponles|ponlos|ponlas|ponmelo|ponmela" +
+    "|(?:pong|marqu|coloqu)(?:a|o|as|an|ame|ala|alo|ale|anme|amelo|amela|e|es|en|eme|ela|elo|ele|enme|emelo|emela)" +
+    "|(?:marc|coloc|dej|registr|anot|apunt|cambi|pas|agreg)(?:a|o|e|ar|as|an|en|es|ame|ala|alo|ale|alos|alas|amelo|amela|eme|ela|elo|ele|emelo|emela|enme|anme)" +
+    "|anade|anadir)";
+  const NO_NOMBRE = new RegExp("(?:^| )(?:" + [
+    VERBO_ASIS, PAL_AUS, PAL_PRES, "no", "si", "a", "al", "de", "del", "la", "el", "los", "las", "lo", "le", "les", "me", "se", "que", "como",
+    "con", "en", "para", "por", "su", "mi", "este", "esta", "estan", "estas", "estos", "ese", "esa", "esos", "esas", "alli", "ahi", "hay", "ha", "han",
+    "es", "son", "fue", "tampoco", "quedo", "quedaron", "queda", "quedan", "asi", "porque", "pero", "llegado", "venido", "estudiante", "estudiantes",
+    "alumno", "alumna", "alumnos", "alumnas", "muchacho", "muchacha", "pelao", "pelada", "chico", "chica", "joven", "lista", "clase", "nino", "nina",
+    "cero", "uno", "una", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve", "diez", "mil", "\\d+",
+    "primero", "primera", "segundo", "segunda", "tercero", "tercera", "cuarto", "cuarta", "quinto", "quinta", "opcion", "numero",
+  ].join("|") + ")(?= |$)", "g");
+  function sinRelleno(s) {
+    let r = " " + s + " ", antes;
+    do { antes = r; r = r.replace(NO_NOMBRE, " "); } while (r !== antes);
+    return r.replace(/\s+/g, " ").trim();
+  }
+  /* Nombres de un trozo: se parte por comas e «y» / «e» y a cada parte se le quita lo que no es nombre. */
+  function nombresDe(trozo) {
+    return trozo.split(/\s*,\s*|\s+(?:y|e)\s+/).map(sinRelleno).filter(Boolean);
+  }
+
+  /* Una orden de asistencia a partir de un trozo ya limpio. */
+  function ordenAsistencia(trozo) {
+    const e = estadoDe(trozo);
+    const nombres = nombresDe(trozo);
+    if (!e.aus && !e.pres) return null;
+    const accion = e.aus && e.pres ? "preguntar" : e.aus ? "ausente" : "presente";
+    if (!nombres.length) return { accion: accion === "preguntar" ? "falta_nombre" : "falta_nombre", nombres: [] };
+    return { accion, nombres };
+  }
+
+  /* «Ana presente y Juan ausente», «Ana vino pero Juan faltó»: varias órdenes. */
+  function ordenesAsistencia(tc) {
+    const partes = tc.split(/\s*,\s*|\s+(?:y|e|pero|luego|despues|mientras)\s+/).map((p) => p.trim()).filter(Boolean);
+    const grupos = [];
+    let actual = null;
+    for (const parte of partes) {
+      const e = estadoDe(parte);
+      const conEstado = e.aus || e.pres;
+      const conNombre = nombresDe(parte).length > 0;
+      if (actual && actual.conEstado && conEstado && conNombre) { grupos.push(actual); actual = null; }
+      if (!actual) actual = { partes: [], conEstado: false };
+      actual.partes.push(parte);
+      actual.conEstado = actual.conEstado || conEstado;
+    }
+    if (actual) grupos.push(actual);
+    if (grupos.length < 2) return null;
+    const ordenes = [];
+    let previa = null;
+    for (const g of grupos) {
+      const trozo = g.partes.join(" , ");
+      let o = ordenAsistencia(trozo);
+      if (!o && previa) o = { accion: previa.accion, nombres: nombresDe(trozo) };
+      if (!o || !o.nombres.length) return null;
+      ordenes.push(o);
+      previa = o;
+    }
+    return ordenes;
+  }
+
+  /* «ponla», «márcalo», «ponla ausente», «no, ponlo presente»: el último estudiante nombrado. */
+  function interpretarPronombre(t) {
+    const m = t.match(/^(?:no )?(?:ponla|ponlo|ponlas|ponlos|ponle|ponmela|ponmelo|marcala|marcalo|marcalas|marcalos|marcale|marcamela|marcamelo|activala|activalo|activalas|activalos|dejala|dejalo|dejale|pongala|pongalo|marquela|marquelo|inactivala|inactivalo)(?: (?:como |de |a )?(presentes?|ausentes?|activ[oa]s?|inactiv[oa]s?|asistencias?|inasistencias?|faltas?))?$/);
+    if (!m) return null;
+    if (/^(?:no )?inactiva/.test(m[0])) return { accion: "ausente", nombres: [], ultimo: true };
+    const estado = accionDeEstado(m[1] || "presente");
+    return { accion: estado || "presente", nombres: [], ultimo: true };
+  }
+
+  function accionDeEstado(s) {
+    const t = normalizar(s);
+    if (new RegExp("^(?:" + PAL_AUS + ")$").test(t)) return "ausente";
+    if (new RegExp("^(?:" + PAL_PRES + ")$").test(t)) return "presente";
+    return null;
+  }
+
+  /* Respuesta a «¿Qué hago con X: presente o ausente?». */
+  function estadoDeRespuesta(texto) {
+    const t = limpiar(normalizar(texto)).replace(/^(?:no )?(?:ponla|ponlo|marcala|marcalo|activala|activalo|dejala|dejalo|pongala|pongalo|marquela|marquelo|pon|marca)\s*/, "")
+      .replace(/^(?:como|de)\s+/, "").trim();
+    if (!t) return /^(?:ponla|ponlo|marcala|marcalo|activala|activalo|pongala|pongalo|marquela|marquelo)/.test(limpiar(normalizar(texto))) ? "presente" : null;
+    const e = estadoDe(t);
+    if (sinRelleno(t)) return null;            // trae un nombre: es otra orden
+    if (e.aus && !e.pres) return "ausente";
+    if (e.pres && !e.aus) return "presente";
+    return null;
+  }
+
+  function preguntaEstado(elegidos) {
+    const nombres = elegidos.map((p) => p.nombre);
+    const quienes = nombres.length > 1 ? `${nombres.slice(0, -1).join(", ")} y ${nombres[nombres.length - 1]}` : nombres[0];
+    return { texto: `¿Qué hago con ${quienes}: presente o ausente?`, voz: "¿Presente o ausente?" };
+  }
+
+  function hayClavesAsistencia(t) {
+    const e = estadoDe(t);
+    return e.aus || e.pres;
+  }
+  function hayClavesBorrar(t) {
+    return /\b(?:elimina|borra|borrelo|borrela|borralo|borrala|borralos|retiro|retiralo|retirala|retirar|elimines|borres|saques)\b/.test(t);
+  }
+
+  function aplicarVerbos(t, paraAsistencia) {
+    t = t
+      .replace(/\b(pongas|ponga|pongame|ponme|pongan|poner|ponle)\b/g, "pon")
+      .replace(/\b(marques|marque|marcar|marcame)\b/g, "marca")
       .replace(/\b(quites|quite|quitar)\b/g, "quita")
-      .replace(/\b(agregues|agregue|agregar|anades|anade|anadir|registra|registrar|mete|meter|crea|crear)\b/g, "agrega")
-      .replace(/\b(elimina|elimines|elimine|eliminar|borra|borres|borre|borrar)\b/g, "elimina")
-      .replace(/\b(saca|saques|saque|sacar)\b/g, "quita")
+      .replace(/\b(elimina|elimine|eliminar|eliminame|eliminalo|eliminala|borra|borre|borrar|borrame|borralo|borrala)\b/g, "elimina")
+      .replace(/\b(saca|saque|sacar|sacame)\b/g, "quita")
       .replace(/\b(pases|pase|pasar|toma|tomar|haz|hacer)\b/g, "pasa");
-    if (["ayuda", "que puedes hacer", "que sabes hacer", "que haces", "comandos"].includes(t)) return { accion: "ayuda", nombres: [] };
+    if (paraAsistencia) t = t.replace(/\b(registra|registrar|registre|registrame|agregues|agregue|agregar|anades|anade|anadir|mete|meter)\b/g, "pon");
+    else t = t.replace(/\b(agregues|agregue|agregar|anades|anade|anadir|registra|registrar|registre|registrame|mete|meter|crea|crear)\b/g, "agrega");
+    return t;
+  }
+
+  /* Números dichos en palabras para los códigos: «cuatro ocho dos uno», «cuatro mil ochocientos veintiuno». */
+  const DIGITOS = { cero: 0, uno: 1, una: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8, nueve: 9 };
+  const VALORES = Object.assign({}, DIGITOS, { diez: 10, once: 11, doce: 12, trece: 13, catorce: 14, quince: 15, dieciseis: 16, diecisiete: 17,
+    dieciocho: 18, diecinueve: 19, veinte: 20, veintiuno: 21, veintiun: 21, veintidos: 22, veintitres: 23, veinticuatro: 24, veinticinco: 25,
+    veintiseis: 26, veintisiete: 27, veintiocho: 28, veintinueve: 29, treinta: 30, cuarenta: 40, cincuenta: 50, sesenta: 60, setenta: 70,
+    ochenta: 80, noventa: 90, cien: 100, ciento: 100, doscientos: 200, trescientos: 300, cuatrocientos: 400, quinientos: 500,
+    seiscientos: 600, setecientos: 700, ochocientos: 800, novecientos: 900 });
+  function numerosEnPalabras(t) {
+    const ws = t.split(" ");
+    const out = [];
+    let i = 0;
+    while (i < ws.length) {
+      let j = i;
+      while (j < ws.length && Object.prototype.hasOwnProperty.call(DIGITOS, ws[j])) j++;
+      if (j - i === 4) { out.push(ws.slice(i, j).map((w) => DIGITOS[w]).join("")); i = j; continue; }
+      if (Object.prototype.hasOwnProperty.call(VALORES, ws[i]) || ws[i] === "mil") {
+        let k = i, total = 0, actual = 0, mil = false, usados = 0;
+        while (k < ws.length) {
+          const w = ws[k];
+          if (w === "y" && usados && Object.prototype.hasOwnProperty.call(VALORES, ws[k + 1] || "")) { k++; continue; }
+          if (w === "mil") { total += (actual || 1) * 1000; actual = 0; mil = true; usados++; k++; continue; }
+          if (Object.prototype.hasOwnProperty.call(VALORES, w)) { actual += VALORES[w]; usados++; k++; continue; }
+          break;
+        }
+        const n = total + actual;
+        if (mil && usados >= 2 && n >= 1000 && n <= 9999) { out.push(String(n)); i = k; continue; }
+      }
+      out.push(ws[i]);
+      i++;
+    }
+    return out.join(" ");
+  }
+
+  const SALUDO = /^(?:hola|holi|holis|hey|buenas|buen dia|buenos dias|buenas tardes|buenas noches|buenas dias|que mas|quiubo|quihubo|que hubo|saludos)(?: .*)?$/;
+  const AYUDAS = /^(?:ayuda|ayudame|ayudeme|que puedes hacer|que sabes hacer|que haces|comandos|como funciona|como funcionas|como te uso|que hago|instrucciones|menu)$/;
+
+  function interpretar(texto) {
+    const crudo = normalizar(texto);
+    const limpio = limpiar(crudo).replace(/^(?:me|nos)\s+/, "");
+    if (!limpio) {
+      if (/(?:^| )gracias(?: |$)/.test(crudo)) return { accion: "gracias", nombres: [] };
+      return { accion: crudo ? "relleno" : "vacio", nombres: [] };
+    }
+    if (AYUDAS.test(limpio) || AYUDAS.test(crudo)) return { accion: "ayuda", nombres: [] };
+    if (/(?:^| )gracias(?: |$)/.test(crudo) && /^(?:ok|okay|okey|vale|listo|bueno|dale|si|bien|perfecto|excelente|chevere|de una|muy amable)?$/.test(limpio)) {
+      return { accion: "gracias", nombres: [] };
+    }
+    if (SALUDO.test(limpio)) {
+      const resto = limpio.replace(/^(?:buenos dias|buenas tardes|buenas noches|buenas dias|buen dia|buenas|holis|holi|hola|hey|que mas|quiubo|quihubo|que hubo|saludos)\s*/, "")
+        .replace(/^(?:buenos dias|buenas tardes|buenas noches|tardes|noches|dias|como (?:esta|estas|va|vas)|que tal)\s*/, "").trim();
+      if (!resto) return { accion: "saludo", nombres: [] };
+      const o = interpretar(resto);
+      return o.accion === "no" || o.accion === "relleno" || o.accion === "vacio" ? { accion: "saludo", nombres: [] } : o;
+    }
+    if (/^(?:no (?:elimines|borres|saques|quites|pongas|marques|lo|la|le|los|las|me)|no (?:a )?nadie|no hagas nada|nada|mejor no|creo que no)\b/.test(limpio)) {
+      if (limpio === "no" || limpio === "nada") return { accion: "no", nombres: [] };
+      return { accion: "nada", nombres: [] };
+    }
+    const pron = interpretarPronombre(limpio);
+    if (pron) return pron;
+    const paraAsistencia = hayClavesAsistencia(limpio);
+    const t = aplicarVerbos(limpio, paraAsistencia);
     if (/^pasa( la| el)? (lista|asistencia)$/.test(t)) return { accion: "pasar", nombres: [] };
-    const entrar = interpretarEntrar(t);
-    if (entrar) return { ...entrar, nombres: [] };
+    const conNumeros = numerosEnPalabras(t);
+    const entrar = interpretarEntrar(conNumeros) || (conNumeros !== t ? null : null);
+    if (entrar && (entrar.codigo || !paraAsistencia)) return { ...entrar, nombres: [] };
     const eliminar = interpretarEliminar(t);
     if (eliminar) return eliminar;
-    if (/^pasa( la| el)? (lista|asistencia)$/.test(t)) return { accion: "pasar", nombres: [] };
     const patrones = [
       ["quitar", /^(?:quita) (?:al |el |la |a )?(?:estudiante|alumno|alumna) (.+)$/],
       ["quitar", /^(?:quita) (?:a |al )?(.+?) (?:de (?:la |el |esta |este |mi )?(?:clase|curso|lista|grupo|materia)\b.*)$/],
       ["agregar", /^(?:agrega) (?:al |a la |el |la |un |una |a )?(?:estudiante |alumno |alumna )?(.+)$/],
       ["ausente", /^(?:quita|elimina) (?:el |los )?presentes? (?:de |a )?(.+)$/],
       ["ausente", /^(?:quita) (?:a )?(.+)$/],
-      ["ausente", /^(?:pon|marca|coloca|deja) (?:a |al |los |las )?(.+?) (?:como )?ausentes?$/],
-      ["ausente", /^(.+?) (?:ya no esta|no vino|falto|faltaron|estan ausentes|esta ausente)$/],
-      ["presente", /^(?:pon|marca|coloca|deja|anota) (?:como )?presentes? (?:a |al |los |las )?(.+)$/],
-      ["presente", /^(?:pon|marca|coloca|deja|anota) (?:a |al |los |las )?(.+?) (?:como )?presentes?$/],
-      ["presente", /^(.+?) (?:estan|esta|quedaron|queda|son) presentes?$/],
     ];
     for (const [accion, patron] of patrones) {
       const m = t.match(patron);
@@ -146,7 +362,30 @@
       }
       return { accion, nombres };
     }
+    /* asistencia: con comas, para poder separar nombres y órdenes */
+    const conComas = limpiar(normalizarConComas(texto)).replace(/^(?:me|nos)\s+/, "").replace(/^(?:, )+|(?: ,)+$/g, "").trim();
+    const varias = ordenesAsistencia(conComas);
+    if (varias) return { accion: "varias", ordenes: varias, nombres: [] };
+    const una = ordenAsistencia(conComas);
+    if (una) return una;
     return { accion: "no", nombres: [] };
+  }
+
+  /* Solo un nombre de la lista, sin decir qué hacer: se pregunta. */
+  function inferirDeLista(texto, lista) {
+    const limpio = limpiar(normalizar(texto));
+    if (!limpio || hayClavesBorrar(limpio)) return null;
+    const nombre = sinRelleno(limpio);
+    if (!nombre) return null;
+    // al menos la mitad de lo dicho tiene que ser, tal cual, una palabra de algún nombre de la lista
+    const palabrasLista = new Set();
+    for (const p of lista) for (const w of palabrasDe(p.nombre)) palabrasLista.add(w);
+    const dichas = palabrasDe(nombre);
+    const exactas = dichas.filter((w) => palabrasLista.has(w) || numeroId(w) !== null).length;
+    if (!dichas.length || exactas * 2 < dichas.length) return null;
+    const [elegidos, , opciones] = resolverNombres([nombre], lista);
+    if (!elegidos.length && !opciones.length) return null;
+    return { accion: "preguntar", nombres: [nombre] };
   }
 
   function numeroId(token) {
@@ -236,7 +475,9 @@
     if (altos.length === 1) {
       const otro = todos.find((r) => r !== altos[0]);
       if (!otro || altos[0].puntaje - otro.puntaje >= 0.08) {
-        return firme(altos[0]) ? { seguro: [altos[0].persona] } : { dudas: [altos[0].persona] };
+        // una sola palabra parecida («cuatro» ~ «castro») nunca basta: se pregunta
+        const unaSola = qs.length === 1 && altos[0].peor < 0.96;
+        return firme(altos[0]) && !unaSola ? { seguro: [altos[0].persona] } : { dudas: [altos[0].persona] };
       }
     }
     if (altos.length > 1) {
@@ -551,16 +792,47 @@
   /* La conversación (sin la página): «¿Cuál?», «¿Elimino a …?» y qué hacer con cada orden. */
   const CONFIRMAR_MS = 3 * 60 * 1000;     // un «sí» que llega mucho después no elimina
   let dialogoActual = null;
+  const SALUDO_R = { texto: "Hola. Dime, por ejemplo: «pon a Ana presente».", voz: "Hola. ¿A quién marco?" };
+  const GRACIAS_R = { texto: "Con gusto.", voz: "Con gusto." };
+  const PISTA_R = { texto: "Dime qué hago, por ejemplo: «pon a Ana presente».", voz: "Dime qué hago." };
+  const NADA_PENDIENTE = { texto: "No tengo nada pendiente. ¿Qué hago?", voz: "No tengo nada pendiente." };
+  const SUELTO = /^(?:si+|sip|no+|nop|nel|ok|okay|okey|vale|listo|dale|claro|de una|bueno|correcto|exacto|confirmo|cancela|cancelar)$/;
+
   function nuevoDialogo(opciones = {}) {
     const pensando = typeof opciones.pensando === "function" ? opciones.pensando : () => {};
     let aclaracion = null;
     let porConfirmar = null;      // { elegidos, ctx, hasta }
+    let porEstado = null;         // { elegidos, ctx }
+    let ultimoElegidos = [];
+    let ultimoCtx = null;
+
+    function recordar(elegidos) {
+      if (elegidos && elegidos.length) { ultimoElegidos = elegidos.slice(); ultimoCtx = ctx; }
+    }
+    function pendiente() { return !!(aclaracion || porConfirmar || porEstado); }
 
     function pedirConfirmar(elegidos) {
       aclaracion = null;
+      porEstado = null;
+      recordar(elegidos);
       porConfirmar = { elegidos, ctx, hasta: Date.now() + CONFIRMAR_MS };
       const donde = typeof ctx.donde === "function" ? ctx.donde() : ctx.donde;
       return preguntaEliminar(elegidos, donde || "");
+    }
+    function pedirEstado(elegidos) {
+      aclaracion = null;
+      porConfirmar = null;
+      recordar(elegidos);
+      porEstado = { elegidos, ctx };
+      return preguntaEstado(elegidos);
+    }
+
+    async function hacer(accion, elegidos) {
+      if (!elegidos.length) return "No cambié a nadie.";
+      if (accion === "quitar") return pedirConfirmar(elegidos);
+      if (accion === "preguntar") return pedirEstado(elegidos);
+      recordar(elegidos);
+      return ctx.actuar({ accion, elegidos });
     }
 
     async function seguirCon(pausa, accion, elegidos) {
@@ -572,90 +844,131 @@
         if (err) return err;
         elegidos = mas;
       }
-      if (!elegidos.length) return "No cambié a nadie.";
-      if (accion === "quitar") return pedirConfirmar(elegidos);
-      return ctx.actuar({ accion, elegidos });
+      return hacer(accion, elegidos);
     }
 
-    async function turno(texto) {
-      if (porConfirmar) {
-        const p = porConfirmar;
-        porConfirmar = null;
-        const vigente = p.ctx === ctx && Date.now() <= p.hasta;
-        if (esSi(texto)) {
-          if (!vigente) return "Eso ya venció. Pídemelo otra vez.";
-          return ctx.actuar({ accion: "quitar", elegidos: p.elegidos, confirmado: true });
-        }
-        if (esNo(texto)) return "Vale, no eliminé a nadie.";
-        // cualquier otra cosa: se olvida la pregunta y se atiende como orden nueva
+    /* Una orden ya entendida (de las reglas o del respaldo). */
+    async function ejecutar(orden, texto) {
+      if (orden.ultimo) {
+        if (!ultimoElegidos.length || ultimoCtx !== ctx) return "¿A quién?";
+        return hacer(orden.accion, ultimoElegidos);
       }
-      let orden = interpretar(texto);
-      if (aclaracion && (orden.accion === "no" || orden.accion === "falta_nombre")) {
-        const t = normalizar(texto);
-        const grupo = aclaracion.opciones || [];
-        const pausa = aclaracion.pausa || { previos: [], resto: [] };
-        const pendiente = aclaracion;
-        if (/^(no|ninguno|ninguna|ningun|cancela|cancelar|nada|olvidalo)$/.test(t)) { aclaracion = null; return "Vale, no cambié nada."; }
-        let elegidos = null;
-        const n = numeroOpcion(t);
-        if (n && n >= 1 && n <= grupo.length) elegidos = [grupo[n - 1]];
-        else if (grupo.length === 1 && /^(si|sip|ese|esa|eso|correcto|exacto|dale|claro)\b/.test(t)) elegidos = [grupo[0]];
-        else if (n) return `Elige del 1 al ${grupo.length}.`;
-        else if (/^(los dos|las dos|ambos|ambas)\b/.test(t)) {
-          if (grupo.length !== 2) return `Son ${grupo.length}, no dos. Dime el número.`;
-          elegidos = grupo;
-        } else if (/^(todos|todas)\b/.test(t)) elegidos = grupo;
-        else {
-          const [elegido, err, opciones, otra] = resolverNombres([texto], grupo);
-          if (opciones && opciones.length) { aclaracion = { ...aclaracion, opciones, pausa: { ...pausa, previos: pausa.previos } }; return err; }
-          if (err) return { texto: "Sigo sin saber cuál. Dime el número.", voz: "Dime el número." };
-          elegidos = elegido;
-        }
-        aclaracion = null;
-        return seguirCon(pausa, pendiente.accion, [...(pausa.previos || []), ...elegidos.filter((p) => !(pausa.previos || []).some((q) => String(q.id) === String(p.id)))]);
-      }
-      aclaracion = null;
       if (orden.accion === "entrar") {
         if (!orden.codigo && !orden.nombre) return "Dime el código de 4 números.";
         if (!navegar) return "Desde aquí no puedo cambiar de lista.";
         return navegar({ codigo: orden.codigo, nombre: orden.nombre, tipo: orden.tipo });
       }
       if (orden.accion === "ayuda") return AYUDA;
+      if (orden.accion === "saludo") return SALUDO_R;
+      if (orden.accion === "gracias") return GRACIAS_R;
+      if (orden.accion === "vacio" || orden.accion === "relleno") return PISTA_R;
+      if (orden.accion === "nada") return "Vale, no hago nada.";
       if (orden.accion === "falta_nombre") return "¿A quién?";
-      if (orden.accion === "no") {
-        // las reglas no entendieron: solo aquí se pregunta al respaldo (lo común sigue siendo al instante)
-        if (!respaldo) return NO_ENTENDI;
-        pensando(true);
-        let otra = null;
-        try { otra = await preguntarRespaldo(texto); }
-        finally { pensando(false); }
-        if (!otra) return NO_ENTENDI;
-        orden = otra;
-        if (orden.accion === "entrar") {
-          if (!navegar) return "Desde aquí no puedo cambiar de lista.";
-          return navegar({ codigo: orden.codigo, nombre: orden.nombre, tipo: orden.tipo });
-        }
-        if (orden.accion === "ayuda") return AYUDA;
-        if (orden.accion === "falta_nombre") return "¿A quién?";
-      }
       if (orden.accion === "pasar") return ctx.actuar({ accion: "pasar" });
       if (orden.accion === "agregar") {
         if (orden.nombres.length !== 1) return "Uno a la vez: cada uno lleva su foto.";
         return ctx.actuar({ accion: "agregar", nombre: orden.nombres[0] });
       }
+      if (orden.accion === "varias") {
+        const dichos = [];
+        for (const o of orden.ordenes) {
+          const r = await ejecutar(o, texto);
+          dichos.push(r);
+          if (pendiente()) break;            // quedó una pregunta: se sigue después
+        }
+        const t = dichos.map(paraTexto).filter(Boolean).join(" ");
+        const v = dichos.map(paraVoz).filter(Boolean).join(" ");
+        return { texto: t, voz: v.length > 150 ? "Listo." : v };
+      }
       const lista = await Promise.resolve(ctx.personas());
-      if (orden.accion === "quitar" && !lista.length) return ctx.actuar({ accion: "quitar", elegidos: [] });   // fuera de una clase: dice dónde
+      if (!lista.length) return ctx.actuar({ accion: orden.accion === "preguntar" ? "presente" : orden.accion, elegidos: [] });   // fuera de una lista: la página dice dónde
       const [elegidos, err, opciones, pausa] = resolverNombres(orden.nombres, lista);
       if (orden.accion === "quitar" && opciones.length === 1 && !(pausa.resto || []).length && !(pausa.previos || []).length) {
         return pedirConfirmar(opciones);        // «¿Es X?» y «¿Elimino a X?» en una sola pregunta
       }
       if (opciones.length) { aclaracion = { accion: orden.accion, opciones, pausa }; return err; }
       if (err) return err;
-      if (orden.accion === "quitar") return pedirConfirmar(elegidos);
-      return ctx.actuar({ accion: orden.accion, elegidos });
+      return hacer(orden.accion, elegidos);
     }
 
-    function olvidar() { aclaracion = null; porConfirmar = null; }
+    async function turno(texto) {
+      texto = String(texto == null ? "" : texto);
+      if (porConfirmar) {
+        const p = porConfirmar;
+        porConfirmar = null;
+        const vigente = p.ctx === ctx && Date.now() <= p.hasta;
+        if (esSi(texto)) {
+          if (!vigente) return "Eso ya venció. Pídemelo otra vez.";
+          recordar(p.elegidos);
+          return ctx.actuar({ accion: "quitar", elegidos: p.elegidos, confirmado: true });
+        }
+        if (esNo(texto)) return "Vale, no eliminé a nadie.";
+        // cualquier otra cosa: se olvida la pregunta y se atiende como orden nueva
+      }
+      if (porEstado) {
+        const p = porEstado;
+        porEstado = null;
+        const estado = estadoDeRespuesta(texto);
+        if (estado) {
+          if (p.ctx !== ctx) return "Eso ya venció. Pídemelo otra vez.";
+          recordar(p.elegidos);
+          return ctx.actuar({ accion: estado, elegidos: p.elegidos });
+        }
+        if (esNo(texto)) return "Vale, no cambié nada.";
+      }
+      let orden;
+      try { orden = interpretar(texto); }
+      catch { orden = { accion: "no", nombres: [] }; }
+      if (aclaracion && (orden.accion === "no" || orden.accion === "falta_nombre" || orden.accion === "relleno")) {
+        const t = normalizar(texto);
+        const grupo = aclaracion.opciones || [];
+        const pausa = aclaracion.pausa || { previos: [], resto: [] };
+        const pend = aclaracion;
+        if (/^(no|nop|nel|ninguno|ninguna|ningun|cancela|cancelar|nada|olvidalo|dejalo|mejor no)$/.test(t)) { aclaracion = null; return "Vale, no cambié nada."; }
+        let elegidos = null;
+        const n = numeroOpcion(t);
+        if (n && n >= 1 && n <= grupo.length) elegidos = [grupo[n - 1]];
+        else if (grupo.length === 1 && /^(si|sip|ese|esa|eso|correcto|exacto|dale|claro|ok|vale)\b/.test(t)) elegidos = [grupo[0]];
+        else if (n) return `¿Cuál? Elige del 1 al ${grupo.length}.`;
+        else if (/^(los dos|las dos|ambos|ambas)\b/.test(t)) {
+          if (grupo.length !== 2) return `Son ${grupo.length}, no dos. Dime el número.`;
+          elegidos = grupo;
+        } else if (/^(todos|todas)\b/.test(t)) elegidos = grupo;
+        else {
+          const dicho = sinRelleno(limpiar(t)) || t;
+          const [elegido, err, opciones] = resolverNombres([dicho], grupo);
+          if (opciones && opciones.length) { aclaracion = { ...aclaracion, opciones }; return err; }
+          if (err || !elegido.length) return { texto: "Sigo sin saber cuál. Dime el número.", voz: "Dime el número." };
+          elegidos = elegido;
+        }
+        aclaracion = null;
+        return seguirCon(pausa, pend.accion, [...(pausa.previos || []), ...elegidos.filter((p) => !(pausa.previos || []).some((q) => String(q.id) === String(p.id)))]);
+      }
+      aclaracion = null;
+      if (orden.accion === "no") {
+        if (SUELTO.test(normalizar(texto))) return NADA_PENDIENTE;      // «sí» o «no» sin nada pendiente
+        // un nombre de la lista sin decir qué hacer: se pregunta en vez de «No entendí»
+        let inferida = null;
+        try {
+          const lista = await Promise.resolve(ctx.personas());
+          inferida = lista && lista.length ? inferirDeLista(texto, lista) : null;
+        } catch { inferida = null; }
+        if (inferida) orden = inferida;
+        else {
+          // las reglas no entendieron: solo aquí se pregunta al respaldo (lo común sigue siendo al instante)
+          if (!respaldo) return NO_ENTENDI;
+          pensando(true);
+          let otra = null;
+          try { otra = await preguntarRespaldo(texto); }
+          finally { pensando(false); }
+          if (!otra) return NO_ENTENDI;
+          orden = otra;
+        }
+      }
+      return ejecutar(orden, texto);
+    }
+
+    function olvidar() { aclaracion = null; porConfirmar = null; porEstado = null; ultimoElegidos = []; ultimoCtx = null; }
     dialogoActual = { turno, olvidar };
     return dialogoActual;
   }
@@ -1199,5 +1512,5 @@
   }
 
   raiz.Asistente = { normalizar, interpretar, alInterpretar, ordenDeRespaldo, resolverNombres, aproximados, numeroOpcion, lineaBoca, paraVoz, montar, contexto, quitar, alEntrar, avisar, lugar, AYUDA,
-    esSi, esNo, preguntaEliminar, nuevoDialogo };
+    esSi, esNo, preguntaEliminar, preguntaEstado, estadoDeRespuesta, nuevoDialogo };
 })(typeof window !== "undefined" ? window : globalThis);
